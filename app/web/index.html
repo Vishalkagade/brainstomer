@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Brainstormer</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --line: #334155;
+      --text: #e2e8f0;
+      --dim: #94a3b8;
+      --accent: #3b82f6;
+      --live: #c2410c;
+      --ok: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+      display: flex;
+      justify-content: center;
+      padding: 32px 20px;
+    }
+    main { width: 100%; max-width: 760px; }
+    h1 { font-size: 20px; margin: 0; font-weight: 600; }
+    .sub { color: var(--dim); font-size: 13px; margin: 4px 0 24px; }
+
+    .bar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    button {
+      font: inherit;
+      color: #fff;
+      background: var(--accent);
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 20px;
+      cursor: pointer;
+    }
+    button.live { background: var(--live); }
+    button:disabled { opacity: .5; cursor: default; }
+
+    .status { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+    .listening .dot { background: var(--ok); }
+    .speaking  .dot { background: var(--accent); }
+    .error     .dot { background: #ef4444; }
+    .error     { color: #fca5a5; }
+
+    .elapsed { margin-left: auto; color: var(--dim); font-size: 13px; }
+
+    #transcript { padding-top: 20px; display: flex; flex-direction: column; gap: 14px; }
+    .line { display: grid; grid-template-columns: 76px 1fr; gap: 14px; }
+    .who { color: var(--dim); font-size: 12px; padding-top: 2px; }
+    .line.agent .who { color: var(--accent); }
+    .partial .said { color: var(--dim); }
+    .empty { color: var(--dim); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Brainstormer</h1>
+    <p class="sub">step 1 — one voice loop, one agent, no modes yet</p>
+
+    <div class="bar">
+      <button id="btn">Start call</button>
+      <div class="status" id="status"><span class="dot"></span><span id="status-text">idle</span></div>
+      <span class="elapsed" id="elapsed"></span>
+    </div>
+
+    <div id="transcript"><p class="empty">Click start, allow the microphone, and talk.</p></div>
+  </main>
+
+  <script>window.AGENT_ID = "{{AGENT_ID}}"</script>
+  <script src="/client.js"></script>
+</body>
+</html>
