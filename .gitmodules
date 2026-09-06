@@ -1,0 +1,3 @@
+[submodule "voice-agent-starter"]
+	path = voice-agent-starter
+	url = https://github.com/AssemblyAI/voice-agent-starter-python
