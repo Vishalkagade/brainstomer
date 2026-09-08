@@ -3,3 +3,5 @@ diagrams
 probes
 .env
 problem_statement.md
+problems.txt
+app/.gitignore

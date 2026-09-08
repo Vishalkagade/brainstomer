@@ -164,7 +164,61 @@ async function addWorklet(ctx, code, name) {
 
 let ws, captureCtx, playbackCtx, playback, mic, startedAt, timer
 
+// The mode the buttons are set to, and the one actually loaded on the socket.
+// They differ between clicking a mode before a call starts and the socket
+// becoming ready.
+let selectedMode = null
+let liveMode = null
+
 $('btn').onclick = () => (ws?.readyState <= 1 ? hangUp() : call())
+
+// --- modes ------------------------------------------------------------------
+
+async function loadModes() {
+  const { modes } = await (await fetch('/profiles')).json()
+  $('modes').replaceChildren()
+  for (const mode of modes) {
+    const button = document.createElement('button')
+    button.className = 'mode'
+    button.textContent = mode.name
+    button.dataset.id = mode.id
+    button.onclick = () => selectMode(mode.id)
+    $('modes').append(button)
+  }
+  if (modes.length) selectMode(modes[0].id)
+}
+
+function selectMode(id) {
+  selectedMode = id
+  for (const button of $('modes').children) {
+    button.classList.toggle('on', button.dataset.id === id)
+  }
+  // Mid-call, the switch happens now. Before a call, it is remembered and
+  // applied the moment the session is ready.
+  if (ws?.readyState === 1 && liveMode !== id) applyMode(id)
+}
+
+async function applyMode(id) {
+  const profile = await (await fetch(`/profile?mode=${encodeURIComponent(id)}`)).json()
+  if (profile.error) return fail(profile.error)
+
+  // The entire swap: one session.update, on the socket that is already open.
+  // No reconnect, no new session, nothing said so far is lost.
+  send({ type: 'session.update', session: profile.session })
+  liveMode = id
+
+  const listen = profile.session.input
+  const td = listen.turn_detection
+  showSwitch(profile.name,
+    `silence ${td.min_silence}–${td.max_silence}ms · ` +
+    `barge-in delay ${td.interruption_delay}ms · ` +
+    `${listen.transcription_mode} · ` +
+    `${listen.keyterms.length} keyterms · ` +
+    `prompt ${profile.budget.total} tok ` +
+    `(l0 ${profile.budget.l0} + l1 ${profile.budget.l1} + l2 ${profile.budget.l2})`)
+}
+
+loadModes()
 
 async function call() {
   $('btn').disabled = true
@@ -241,6 +295,9 @@ async function call() {
           $('btn').disabled = false
           $('btn').textContent = 'End call'
           $('btn').classList.add('live')
+          // The stored agent's own prompt got us this far. Now load the real
+          // profile — this is the first swap of every call.
+          if (selectedMode) applyMode(selectedMode)
           break
 
         // The user started talking over the agent. Empty the playback buffer so
@@ -273,10 +330,19 @@ async function call() {
           addLine('you', msg.text)
           break
 
-        // The agent's text also arrives as deltas, but the finalised message
-        // carries the whole reply. Step 1 only prints the final one; stitching
-        // deltas is fiddly and buys nothing yet.
+        // Word-level, aligned to the audio as it plays — so the caption keeps
+        // pace with the voice rather than landing all at once.
+        case 'transcript.agent.delta':
+          agentDelta(msg.reply_id, msg.delta)
+          break
+
+        // The whole reply, sent once its audio has been DELIVERED — which beats
+        // the audio finishing playing, so deltas for this reply keep arriving
+        // after this line prints. finishedReply stops them rebuilding the same
+        // sentence underneath it.
         case 'transcript.agent':
+          finishedReply = msg.reply_id ?? finishedReply
+          dropAgentPartial()
           addLine('agent', msg.text)
           break
 
@@ -334,6 +400,11 @@ function teardown() {
 function reset() {
   clearInterval(timer)
   dropPartial()
+  dropAgentPartial()
+  agentReply = finishedReply = null
+  // The socket is gone, so no profile is loaded on it any more. The button
+  // selection survives; the next call re-applies it at session.ready.
+  liveMode = null
   $('btn').disabled = false
   $('btn').textContent = 'Start call'
   $('btn').classList.remove('live')
@@ -357,10 +428,64 @@ function tick() {
 
 // --- transcript -------------------------------------------------------------
 
-let partialEl = null
+let partialEl = null       // the user's live line
+let agentEl = null         // the agent's live line, built from deltas
+let agentText = ''
+let agentReply = null      // reply_id the live agent line belongs to
+let finishedReply = null   // reply_id already printed in full
 
 function clearEmpty() {
   $('transcript').querySelector('.empty')?.remove()
+}
+
+// Deltas arrive sometimes with a leading space and sometimes without, so add
+// one only when neither side has it and the delta is not punctuation that
+// attaches to the word before it.
+const ATTACHES_LEFT = /^[.,!?;:%°)\]}…'"’”]/
+const NO_SPACE_AFTER = /[([{$\-\/'"‘“]$/
+
+function appendDelta(text, delta) {
+  if (!delta) return text
+  if (!text) return delta
+  if (/^\s/.test(delta) || /\s$/.test(text)) return text + delta
+  if (ATTACHES_LEFT.test(delta) || NO_SPACE_AFTER.test(text)) return text + delta
+  return text + ' ' + delta
+}
+
+function agentDelta(replyId, delta) {
+  if (replyId && replyId === finishedReply) return  // already printed in full
+  if (replyId !== agentReply) {
+    agentReply = replyId
+    dropAgentPartial()
+  }
+  clearEmpty()
+  agentText = appendDelta(agentText, delta)
+  if (agentEl) {
+    agentEl.querySelector('.said').textContent = agentText
+  } else {
+    agentEl = makeLine('agent', agentText, 'partial')
+    $('transcript').append(agentEl)
+  }
+  scrollDown()
+}
+
+function dropAgentPartial() {
+  agentEl?.remove()
+  agentEl = null
+  agentText = ''
+}
+
+function showSwitch(name, detail) {
+  clearEmpty()
+  const line = document.createElement('div')
+  line.className = 'switch'
+  line.textContent = `profile loaded — ${name}`
+  const small = document.createElement('span')
+  small.className = 'detail'
+  small.textContent = detail
+  line.append(small)
+  $('transcript').append(line)
+  scrollDown()
 }
 
 function makeLine(who, text, extra) {

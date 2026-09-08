@@ -17,11 +17,13 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import profiles  # noqa: E402
 
 WEB = Path(__file__).resolve().parent / "web"
 
@@ -58,7 +60,36 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802  (the base class names it this)
-        path = self.path.split("?")[0]
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        # Which modes exist, for the buttons on the page.
+        if path == "/profiles":
+            modes = [{"id": m, "name": profiles.assemble(m)["name"]}
+                     for m in profiles.list_modes()]
+            self._send(200, json.dumps({"modes": modes}).encode(), "application/json")
+            return
+
+        # One assembled profile. The prompt layers are read fresh on every
+        # request, so editing a .md file and clicking the mode button again
+        # applies it without restarting anything — which is what makes these
+        # files worth editing by hand.
+        if path == "/profile":
+            mode = parse_qs(parsed.query).get("mode", [""])[0]
+            if mode not in profiles.list_modes():
+                self._send(404, b'{"error":"no such mode"}', "application/json")
+                return
+            try:
+                body = json.dumps(profiles.assemble(mode)).encode()
+            except SystemExit as err:
+                # A layer over its token cap. Surface it to the page rather than
+                # killing the server.
+                print(f"profile {mode}: {err}")
+                self._send(500, json.dumps({"error": str(err)}).encode(),
+                           "application/json")
+                return
+            self._send(200, body, "application/json")
+            return
 
         if path == "/token":
             try:
