@@ -1,6 +1,8 @@
 ---
 {
   "name": "Deep work",
+  "hue": 190,
+  "tools": ["web_search"],
   "history_depth": 30,
   "model": null,
   "turn_detection": {

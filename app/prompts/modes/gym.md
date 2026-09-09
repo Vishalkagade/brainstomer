@@ -1,6 +1,8 @@
 ---
 {
   "name": "Gym",
+  "hue": 24,
+  "tools": [],
   "history_depth": 3,
   "model": null,
   "turn_detection": {

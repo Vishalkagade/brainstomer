@@ -24,6 +24,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 import profiles  # noqa: E402
+import tools  # noqa: E402
 
 WEB = Path(__file__).resolve().parent / "web"
 
@@ -65,8 +66,19 @@ class Handler(BaseHTTPRequestHandler):
 
         # Which modes exist, for the buttons on the page.
         if path == "/profiles":
-            modes = [{"id": m, "name": profiles.assemble(m)["name"]}
-                     for m in profiles.list_modes()]
+            modes = []
+            for name in profiles.list_modes():
+                profile = profiles.assemble(name)
+                turn = profile["session"]["input"]["turn_detection"]
+                # hue and min_silence travel with the button so the page can
+                # recolour itself and show the silence window the moment a mode
+                # is picked — before any call exists to fetch a full profile.
+                modes.append({
+                    "id": name,
+                    "name": profile["name"],
+                    "hue": profile["hue"],
+                    "min_silence": turn["min_silence"],
+                })
             self._send(200, json.dumps({"modes": modes}).encode(), "application/json")
             return
 
@@ -109,6 +121,35 @@ class Handler(BaseHTTPRequestHandler):
         # socket the moment it loads.
         page = (WEB / "index.html").read_text().replace("{{AGENT_ID}}", AGENT_ID)
         self._send(200, page.encode(), "text/html; charset=utf-8")
+
+    def do_POST(self) -> None:  # noqa: N802  (the base class names it this)
+        """Run one tool on the page's behalf.
+
+        The WebSocket lives in the browser, so `tool.call` arrives there — but
+        the Exa key is in this process and has to stay here, exactly like the
+        AssemblyAI key. So the page relays the call to us, we run it, and it
+        gets back only the shaped result. Nothing the browser holds could be
+        used to spend someone else's search quota.
+
+        This blocks for as long as the search takes, roughly 1.7 s. That is
+        fine: the server is a ThreadingHTTPServer, so the page can still fetch
+        while a tool runs, and the audio never comes through here at all.
+        """
+        if urlparse(self.path).path != "/tool":
+            self._send(404, b'{"error":"no such endpoint"}', "application/json")
+            return
+
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            call = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            self._send(400, b'{"error":"not json"}', "application/json")
+            return
+
+        # tools.run never raises and always returns a JSON string, so this is
+        # handed straight to the page and on into tool.result unchanged.
+        result = tools.run(call.get("name", ""), call.get("arguments") or {})
+        self._send(200, json.dumps({"result": result}).encode(), "application/json")
 
     def log_message(self, *args) -> None:
         """Silence the default per-request logging; real errors print above."""

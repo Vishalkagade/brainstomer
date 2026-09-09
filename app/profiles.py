@@ -15,6 +15,8 @@ import json
 import sys
 from pathlib import Path
 
+import tools
+
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 MODES = PROMPTS / "modes"
 
@@ -109,6 +111,12 @@ def assemble(mode: str) -> dict:
             "transcription_mode": settings["transcription_mode"],
             "keyterms": settings["keyterms"],
         },
+        # Always sent, even when empty. A session.update REPLACES the tools
+        # array rather than merging into it, so a mode with no tools must say
+        # so explicitly — omit the key and the previous mode's tools would stay
+        # live after the swap. `[]` is what actually takes web_search away from
+        # the agent when you switch from deep work to gym.
+        "tools": tools.definitions_for(settings.get("tools", [])),
     }
 
     # The two dimensions the API has no knob for. They are declared in the mode
@@ -124,6 +132,10 @@ def assemble(mode: str) -> dict:
     return {
         "mode": mode,
         "name": settings.get("name", mode),
+        # Base hue for the page's instrument, in degrees. It sits OUTSIDE
+        # `session` on purpose: everything in there goes on the wire verbatim,
+        # and an unknown field would be rejected. This is ours, for the browser.
+        "hue": settings.get("hue", 190),
         "session": session,
         "budget": budget,
         "not_applied": not_applied,

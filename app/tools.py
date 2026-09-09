@@ -1,39 +1,4 @@
-"""The tools an agent may call, and the code that runs them.
-
-    .venv/bin/python app/tools.py                     list the registry
-    .venv/bin/python app/tools.py "who won the F1 race last weekend"
-
-One registry, keyed by tool name. Each entry holds the `definition` the model
-sees — the name, the description and the argument schema that decide WHEN it is
-called — next to the `handler` that runs when it is. Keeping them in one entry
-is what makes it impossible to offer the model a tool with nothing behind it.
-
-Why a registry instead of putting each tool in the mode file that wants it: a
-mode file holds settings that are genuinely per-mode, and the rule there is that
-a mode IS its settings-plus-prompt. A tool schema is not per-mode — it is the
-same fifteen lines every time. Copying it into each mode would be the drift risk,
-not the cure. Modes name the tools they want (`"tools": ["web_search"]`) and the
-definition is written once, here.
-
-These are CLIENT-SIDE function tools, not server-side HTTP tools. AssemblyAI
-supports both: an HTTP tool means they call Exa directly and feed us the reply,
-which is less code and no round trip. We do not use it, for one reason —
-payload size. Measured on 9 Sep 2026 against a live current-affairs query:
-
-    Exa /search + contents   1457 ms    95,689 chars   ~23,900 tokens
-    Exa /answer              1877 ms     4,152 chars    ~1,038 tokens
-    the answer text alone                  464 chars      ~116 tokens
-
-L0 + L1 + L2 together are capped at 1,700 tokens. A raw /search result is
-fourteen times the entire profile system, and even /answer is nine times bigger
-than the part worth speaking — the rest is citation ids, images and authors. An
-HTTP tool would put all of that into the model's context with no say from us.
-Handling the call ourselves is what lets shape_answer() below cut it to ~150.
-
-The second reason to run tools here rather than in the page: the Exa key lives
-in this process and never reaches the browser. The page relays a tool.call to us
-and gets back only the shaped result — the same boundary server.py already
-enforces for the AssemblyAI key.
+"""The tools an agent may call
 """
 
 import json
@@ -46,49 +11,11 @@ import config
 
 EXA_ANSWER_URL = "https://api.exa.ai/answer"
 
-# Exa took 1.9 s on the measurement above. 15 s leaves room for a slow day
-# without leaving the caller hanging: the agent is talking over this wait
-# (see execution_mode below), and it has to have something to say when we
-# come back.
-SEARCH_TIMEOUT_SECONDS = 15
-
-# How many sources to name. The model can say "according to Reuters"; it cannot
-# usefully speak a URL, so only titles travel and three is as many as anyone
-# tracks by ear.
-MAX_SOURCES = 3
-
-# A ceiling on the ANSWER TEXT, in characters — roughly 200 tokens at the
-# chars/4 estimate profiles.py uses. The source titles and the JSON envelope
-# ride on top of this, so it caps the part that grows without bound rather than
-# the whole result.
-#
-# Note this truncates where a prompt layer over its cap raises SystemExit. That
-# difference is deliberate: a prompt layer is authored text, and being forced to
-# evict something is the point. A tool result is runtime data arriving mid-call,
-# and crashing the session because a news answer ran long would be absurd.
+SEARCH_TIMEOUT_SECONDS = 15 # time to wait
+MAX_SOURCES = 3 # no of sources
 MAX_ANSWER_CHARS = 800
-
-# Exa writes inline markers — "...rates unchanged on 23 July 2026 [1]. The
-# Council is expected to raise [2][3][4]..." Text-to-speech reads those out
-# loud, so the agent says "bracket one" mid-sentence. The leading \s* takes the
-# space in front of the marker with it, so no double space is left behind.
-# Strips "[1]", "[2][3]" and "[1, 2]" alike.
-#
-# Not really an Exa quirk: bracketed citations are the convention for cited LLM
-# answers generally, and the reason to strip them — they are unspeakable — holds
-# whoever produced the text. This survives a change of provider.
-CITATION_MARKER = re.compile(r"\s*\[\d+(?:\s*,\s*\d+)*\]")
-
-# One client for the life of the process, built on first use.
-#
-# httpx.post() builds a fresh client per call, which means a new SSLContext and
-# a new TLS handshake every search: measured at 32 ms of CPU plus 64 ms of
-# network on this machine, ~96 ms added to every lookup while someone waits mid
-# call. A reused client pays that once. It is built lazily rather than at import
-# so that importing this module does not demand an Exa key from anyone who is
-# not going to search — profiles.py imports it to read tool definitions.
+CITATION_MARKER = re.compile(r"\s*\[\d+(?:\s*,\s*\d+)*\]") # so it removes the inline [n] markers, which TTS would otherwise read aloud
 _client: httpx.Client | None = None
-
 
 def exa_client() -> httpx.Client:
     global _client
@@ -118,11 +45,7 @@ def shape_answer(payload: dict) -> dict:
     """
     answer = strip_citation_markers(payload.get("answer") or "")
     if len(answer) > MAX_ANSWER_CHARS:
-        # Cut at a sentence end if there is one in the back half, so the agent
-        # is not reading a half sentence aloud. If the only sentence break is
-        # near the start, keeping it would throw away most of the answer, so
-        # take the hard cut instead.
-        clipped = answer[:MAX_ANSWER_CHARS]
+        clipped = answer[:MAX_ANSWER_CHARS] # but we might loose the imp info?
         stop = clipped.rfind(". ")
         answer = clipped[: stop + 1] if stop > MAX_ANSWER_CHARS // 2 else clipped
 
@@ -146,35 +69,6 @@ def web_search(query: str) -> dict:
     response.raise_for_status()
     return shape_answer(response.json())
 
-
-# name -> {definition, handler}.
-#
-# Every key inside `definition` is a field of a client-side function tool in a
-# session.update:
-#
-#   type             always "function" — this is the shape that comes back to us
-#                    as a tool.call over the socket, rather than one AssemblyAI
-#                    resolves on its own.
-#   name             what arrives in tool.call.name, and our key into TOOLS.
-#   description      the model's ONLY signal for when to call. Written as a
-#                    trigger, not a summary: lead with the verb, then the exact
-#                    condition. This is the field to edit if the agent searches
-#                    too eagerly or not enough.
-#   parameters       JSON Schema for the arguments. `required` matters — without
-#                    it the model may call with no query at all.
-#   execution_mode   "interactive" lets the agent keep talking while we work,
-#                    so a two-second lookup sounds like "let me check" rather
-#                    than a dropped call. "hold" would go silent. AssemblyAI's
-#                    own guidance names wrapping a slow lookup in "hold" as the
-#                    common mistake.
-#   timeout_seconds  the agent apologises and carries on past this; the session
-#                    survives. Kept just above our own httpx timeout so ours
-#                    fires first and we control the message.
-#
-# The handler takes the parsed `arguments` object and returns anything
-# JSON-serialisable. It reads its argument out of the dict rather than being
-# called with **arguments, because the model sometimes invents an extra key and
-# an unexpected one should be ignored, not raise.
 TOOLS = {
     "web_search": {
         "definition": {
@@ -183,7 +77,7 @@ TOOLS = {
             "description": (
                 "Look up current information on the web. Use this whenever the "
                 "answer depends on something recent, changing, or specific that "
-                "you are not certain of — news, prices, results, releases, who "
+                "you are not certain of such as  news, prices, results, releases, who "
                 "currently holds a position. Prefer calling it over guessing or "
                 "saying your knowledge may be out of date."
             ),
