@@ -63,15 +63,23 @@ def save_env(key: str, value: str, path: Path = ENV_FILE) -> None:
     path.write_text(text)
 
 
-def api_key() -> str:
+def require(name: str, where: str) -> str:
+    """Read a required credential, or explain where to get one and stop.
+
+    Every key the project needs comes through here, so a missing one always
+    fails the same way: at startup, by name, with the URL that fixes it —
+    rather than as a 401 from somewhere deep in a call.
+    """
     load_env()
-    key = os.environ.get("ASSEMBLYAI_API_KEY")
-    if not key:
-        raise SystemExit(
-            "No ASSEMBLYAI_API_KEY in .env — get one at "
-            "https://www.assemblyai.com/dashboard/api-keys"
-        )
-    return key
+    value = os.environ.get(name)
+    if not value:
+        raise SystemExit(f"No {name} in .env — get one at {where}")
+    return value
+
+
+def api_key() -> str:
+    return require("ASSEMBLYAI_API_KEY",
+                   "https://www.assemblyai.com/dashboard/api-keys")
 
 
 def headers() -> dict:
