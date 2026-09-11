@@ -169,6 +169,7 @@ let ws, captureCtx, playbackCtx, playback, mic, startedAt, timer
 // becoming ready.
 let selectedMode = null
 let liveMode = null
+let sessionId = null   // from session.ready; every swap is logged against it
 let modesById = {}
 
 $('btn').onclick = () => (ws?.readyState <= 1 ? hangUp() : call())
@@ -403,6 +404,17 @@ function selectMode(id) {
   if (ws?.readyState === 1 && liveMode !== id) applyMode(id)
 }
 
+// Tell the server which mode version this session is on from this moment.
+// Fire and forget: a failed log must never delay or break the swap itself.
+function logSwitch(mode, versionId, source) {
+  if (!sessionId) return
+  fetch('/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, ts_ms: Date.now(), mode, version_id: versionId, source }),
+  }).catch(() => {})
+}
+
 async function applyMode(id) {
   const profile = await (await fetch(`/profile?mode=${encodeURIComponent(id)}`)).json()
   if (profile.error) return fail(profile.error)
@@ -411,6 +423,7 @@ async function applyMode(id) {
   // No reconnect, no new session, nothing said so far is lost.
   send({ type: 'session.update', session: profile.session })
   liveMode = id
+  logSwitch(id, profile.version_id, 'manual')
 
   const listen = profile.session.input
   const td = listen.turn_detection
@@ -514,6 +527,7 @@ async function call() {
       switch (msg.type) {
         case 'session.ready':
           ready = true
+          sessionId = msg.session_id
           startedAt = Date.now()
           timer = setInterval(tick, 1000)
           tick()
@@ -647,6 +661,7 @@ function reset() {
   // The socket is gone, so no profile is loaded on it any more. The button
   // selection survives; the next call re-applies it at session.ready.
   liveMode = null
+  sessionId = null
   $('btn').disabled = false
   $('btn').textContent = 'Start call'
   $('btn').classList.remove('live')

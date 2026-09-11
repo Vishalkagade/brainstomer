@@ -14,7 +14,9 @@ nothing here breaks the call if it restarts.
 
 import json
 import os
+import sqlite3
 import sys
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -24,6 +26,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 import profiles  # noqa: E402
+import store  # noqa: E402
 import tools  # noqa: E402
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -123,33 +126,44 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, page.encode(), "text/html; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802  (the base class names it this)
-        """Run one tool on the page's behalf.
-
-        The WebSocket lives in the browser, so `tool.call` arrives there — but
-        the Exa key is in this process and has to stay here, exactly like the
-        AssemblyAI key. So the page relays the call to us, we run it, and it
-        gets back only the shaped result. Nothing the browser holds could be
-        used to spend someone else's search quota.
-
-        This blocks for as long as the search takes, roughly 1.7 s. That is
-        fine: the server is a ThreadingHTTPServer, so the page can still fetch
-        while a tool runs, and the audio never comes through here at all.
-        """
-        if urlparse(self.path).path != "/tool":
+        path = urlparse(self.path).path
+        if path not in ("/tool", "/switch"):
             self._send(404, b'{"error":"no such endpoint"}', "application/json")
             return
 
         length = int(self.headers.get("Content-Length") or 0)
         try:
-            call = json.loads(self.rfile.read(length) or b"{}")
+            body = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
             self._send(400, b'{"error":"not json"}', "application/json")
             return
 
-        # tools.run never raises and always returns a JSON string, so this is
-        # handed straight to the page and on into tool.result unchanged.
+        if path == "/tool":
+            self._run_tool(body)
+        else:
+            self._log_switch(body)
+
+    def _run_tool(self, call: dict) -> None:
+        """Run one tool for the page. The Exa key stays here, like the AssemblyAI key."""
+        # tools.run never raises and always returns a JSON string, handed on into tool.result unchanged
         result = tools.run(call.get("name", ""), call.get("arguments") or {})
         self._send(200, json.dumps({"result": result}).encode(), "application/json")
+
+    def _log_switch(self, body: dict) -> None:
+        """Record a profile swap. The browser is the only one who knows the session id and the moment."""
+        needed = ("session_id", "ts_ms", "mode", "version_id", "source")
+        missing = [key for key in needed if body.get(key) in (None, "")]
+        if missing:
+            self._send(400, json.dumps({"error": f"missing {', '.join(missing)}"}).encode(), "application/json")
+            return
+        try:
+            with closing(store.connect()) as conn:
+                row_id = store.log_switch(conn, body["session_id"], int(body["ts_ms"]),
+                                          body["mode"], int(body["version_id"]), body["source"])
+        except (sqlite3.IntegrityError, ValueError) as err:  # unknown mode/version, or a non-number
+            self._send(400, json.dumps({"error": str(err)}).encode(), "application/json")
+            return
+        self._send(200, json.dumps({"id": row_id}).encode(), "application/json")
 
     def log_message(self, *args) -> None:
         """Silence the default per-request logging; real errors print above."""

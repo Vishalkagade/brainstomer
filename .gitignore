@@ -5,3 +5,10 @@ probes
 problem_statement.md
 problems.txt
 app/.gitignore
+tests
+
+# Parked experiment: the deep-work visual panel. See prototypes/NOTES.md.
+prototypes
+
+# The mode store. Binary, per machine; app/store.py dump writes it out as markdown.
+app/data/

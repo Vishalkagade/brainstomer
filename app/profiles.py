@@ -13,12 +13,13 @@ precedence rule in L0 only means anything if L0 is read first.
 
 import json
 import sys
+from contextlib import closing
 from pathlib import Path
 
+import store
 import tools
 
 PROMPTS = Path(__file__).resolve().parent / "prompts"
-MODES = PROMPTS / "modes"
 
 # Hard caps, in tokens. These are the design, not a limitation: to add something
 # the evolver has to evict something and say which. A layer over its cap is an
@@ -71,18 +72,19 @@ def parse_mode(path: Path) -> tuple[dict, str]:
 
 
 def list_modes() -> list[str]:
-    return sorted(p.stem for p in MODES.glob("*.md"))
+    with closing(store.connect()) as conn:  # closing() actually closes; bare `with conn:` only ends a transaction
+        return [row["id"] for row in store.list_modes(conn)]
 
 
 def assemble(mode: str) -> dict:
     """Build everything needed to swap into `mode` on an open socket."""
-    path = MODES / f"{mode}.md"
-    if not path.exists():
-        raise SystemExit(f"No mode '{mode}'. Have: {', '.join(list_modes())}")
-
     bedrock = read_layer(PROMPTS / "l0_bedrock.md")
     user_core = read_layer(PROMPTS / "l1_user_core.md")
-    settings, overlay = parse_mode(path)
+
+    # L2 comes from the store's live version, not the .md file (that was only the v1 seed)
+    with closing(store.connect()) as conn:  # closing() actually closes; bare `with conn:` only ends a transaction
+        live = store.current(conn, mode)
+    settings, overlay = live["settings"], live["prompt"]
 
     budget = {
         "l0": check_cap("l0", bedrock),
@@ -132,6 +134,8 @@ def assemble(mode: str) -> dict:
     return {
         "mode": mode,
         "name": settings.get("name", mode),
+        "version_id": live["version_id"],  # store row id, goes into the switch log
+        "version": live["n"],  # per-mode number, for display: "Gym v1"
         # Base hue for the page's instrument, in degrees. It sits OUTSIDE
         # `session` on purpose: everything in there goes on the wire verbatim,
         # and an unknown field would be rejected. This is ours, for the browser.
