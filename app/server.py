@@ -26,6 +26,8 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 import profiles  # noqa: E402
+import router  # noqa: E402
+import spawner  # noqa: E402
 import store  # noqa: E402
 import tools  # noqa: E402
 
@@ -127,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802  (the base class names it this)
         path = urlparse(self.path).path
-        if path not in ("/tool", "/switch"):
+        if path not in ("/tool", "/switch", "/route"):
             self._send(404, b'{"error":"no such endpoint"}', "application/json")
             return
 
@@ -140,8 +142,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/tool":
             self._run_tool(body)
-        else:
+        elif path == "/switch":
             self._log_switch(body)
+        else:
+            self._route(body)
 
     def _run_tool(self, call: dict) -> None:
         """Run one tool for the page. The Exa key stays here, like the AssemblyAI key."""
@@ -164,6 +168,33 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, json.dumps({"error": str(err)}).encode(), "application/json")
             return
         self._send(200, json.dumps({"id": row_id}).encode(), "application/json")
+
+    def _route(self, body: dict) -> None:
+        """Decide the mode for a partial transcript. Answers fast; the page decides whether to act."""
+        text = (body.get("text") or "").strip()
+        if not text or not body.get("session_id"):
+            self._send(400, b'{"error":"need text and session_id"}', "application/json")
+            return
+        live_mode = body.get("live_mode") or None
+        try:
+            with closing(store.connect()) as conn:
+                decision = router.decide(text, live_mode, router.load_fingerprints(conn),
+                                         router.keyterm_index(conn), embed_fn=router.embed)  # passed at call time so tests can fake it
+                vector = decision.pop("_vector", None)  # 4096 floats: for the store, not for the page
+                if decision["signal"] == "unknown" and body.get("final"):  # once per utterance, not per partial
+                    cid = store.add_candidate(conn, router.GENERAL, body["session_id"], "unknown_topic", text, vector)
+                    new_mode = spawner.maybe_spawn(conn, body["session_id"], cid, name_fn=spawner.name_topic)
+                    if new_mode:
+                        live = store.current(conn, new_mode)
+                        decision.update(mode=new_mode, switch=True, signal="spawned",
+                                        spawned={"id": new_mode, "name": live["name"]})
+                if decision["signal"] not in ("too_short", "no_fingerprints"):
+                    store.log_route(conn, body["session_id"], int(body.get("ts_ms") or 0), text, live_mode, decision)
+        except (Exception, SystemExit) as err:  # a routing failure must never take the call down; the page just stays put
+            print(f"route failed: {err}")
+            self._send(500, json.dumps({"error": str(err), "switch": False}).encode(), "application/json")
+            return
+        self._send(200, json.dumps(decision).encode(), "application/json")
 
     def log_message(self, *args) -> None:
         """Silence the default per-request logging; real errors print above."""

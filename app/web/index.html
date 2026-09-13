@@ -135,6 +135,10 @@
       transition: color .25s, border-color .25s, background-color .25s;
     }
     .mode:hover { color: var(--text); }
+    .mode.pinned::after {
+      content: ' •';           /* hand on the wheel: router is muted for this call */
+      opacity: .7;
+    }
     .mode.on {
       color: var(--accent);
       border-color: var(--accent-line);

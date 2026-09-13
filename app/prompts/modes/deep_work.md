@@ -1,6 +1,7 @@
 ---
 {
   "name": "Deep work",
+  "about": "Software and machine learning engineering: debugging systems, network and API behaviour, model training and evaluation, data pipelines, architecture and design trade-offs, thinking through a technical problem step by step.",
   "hue": 190,
   "tools": ["web_search"],
   "history_depth": 30,

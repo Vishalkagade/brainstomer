@@ -170,6 +170,11 @@ let ws, captureCtx, playbackCtx, playback, mic, startedAt, timer
 let selectedMode = null
 let liveMode = null
 let sessionId = null   // from session.ready; every swap is logged against it
+let pinned = false     // you clicked a mode button during this call: router stays quiet
+let routeBusy = false  // one /route in flight at a time
+let lastRouteAt = 0
+let routedText = ''    // last text we asked about; do not ask twice for the same words
+let lastAgentText = '' // what the agent last said; if 'you' say the same words, that is the speaker leaking into the mic
 let modesById = {}
 
 $('btn').onclick = () => (ws?.readyState <= 1 ? hangUp() : call())
@@ -371,7 +376,7 @@ const aura = (() => {
 
 // --- modes ------------------------------------------------------------------
 
-async function loadModes() {
+async function loadModes(refresh = false) {
   const { modes } = await (await fetch('/profiles')).json()
   $('modes').replaceChildren()
   for (const mode of modes) {
@@ -383,14 +388,24 @@ async function loadModes() {
     button.onclick = () => selectMode(mode.id)
     $('modes').append(button)
   }
-  if (modes.length) selectMode(modes[0].id)
+  if (refresh) highlight(liveMode)          // a mode was just spawned mid-call: new button, keep the selection
+  else if (modes.length) selectMode(modes[0].id)
+}
+
+function highlight(id) {
+  for (const button of $('modes').children) {
+    button.classList.toggle('on', button.dataset.id === id)
+    button.classList.toggle('pinned', pinned && button.dataset.id === id)
+  }
 }
 
 function selectMode(id) {
   selectedMode = id
-  for (const button of $('modes').children) {
-    button.classList.toggle('on', button.dataset.id === id)
+  if (ws?.readyState === 1) {
+    // a click mid-call is a hand on the wheel; a second click on the same live mode lets go
+    pinned = !(pinned && liveMode === id)
   }
+  highlight(id)
   // Recolour and re-scale the instrument immediately, so picking a mode shows
   // what it is before the call starts. Mid-call, applyMode does it again from
   // the assembled profile, which is the authoritative copy.
@@ -415,7 +430,47 @@ function logSwitch(mode, versionId, source) {
   }).catch(() => {})
 }
 
-async function applyMode(id) {
+// Ask the server which mode these words belong to, while the user is still talking.
+// Throttled to once a second, at least four words, never while pinned or while a
+// previous ask is in flight. The final transcript gets one last ask regardless of the clock.
+// Echo: the agent's voice coming back through the mic is transcribed as if you said it.
+// Then the router would route the agent's words and save them as candidates. Skip those.
+function looksLikeEcho(text) {
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
+  const heard = norm(text)
+  if (heard.length < 20) return false
+  return norm(lastAgentText).includes(heard) || norm(agentText).includes(heard)
+}
+
+async function maybeRoute(text, final = false) {
+  if (!sessionId || pinned || routeBusy) return
+  if (text.trim().split(/\s+/).length < 4) return
+  if (looksLikeEcho(text)) return
+  if (text === routedText) return
+  if (!final && Date.now() - lastRouteAt < 1000) return
+  routeBusy = true
+  lastRouteAt = Date.now()
+  routedText = text
+  try {
+    const res = await fetch('/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, live_mode: liveMode, session_id: sessionId, ts_ms: Date.now(), final }),
+    })
+    const d = await res.json()
+    if (res.ok && d.switch && !pinned && d.mode && d.mode !== liveMode) {
+      if (d.spawned) await loadModes(true)   // the new mode needs a button before it can be highlighted
+      selectedMode = d.mode
+      await applyMode(d.mode, d.spawned ? 'spawner' : 'router')
+    }
+  } catch (err) {
+    // routing is best effort; the call goes on in the current mode
+  } finally {
+    routeBusy = false
+  }
+}
+
+async function applyMode(id, source = 'manual') {
   const profile = await (await fetch(`/profile?mode=${encodeURIComponent(id)}`)).json()
   if (profile.error) return fail(profile.error)
 
@@ -423,13 +478,14 @@ async function applyMode(id) {
   // No reconnect, no new session, nothing said so far is lost.
   send({ type: 'session.update', session: profile.session })
   liveMode = id
-  logSwitch(id, profile.version_id, 'manual')
+  logSwitch(id, profile.version_id, source)
+  highlight(id)
 
   const listen = profile.session.input
   const td = listen.turn_detection
   aura.tune(profile.hue, td.min_silence)
   $('live-mode').textContent = profile.name
-  showSwitch(profile.name,
+  showSwitch(source === 'spawner' ? `new mode — ${profile.name}` : source === 'router' ? `${profile.name} (router)` : profile.name,
     `silence ${td.min_silence}–${td.max_silence}ms · ` +
     `barge-in delay ${td.interruption_delay}ms · ` +
     `${listen.transcription_mode} · ` +
@@ -572,10 +628,12 @@ async function call() {
         // it replaces the line rather than appending to it.
         case 'transcript.user.delta':
           partial(msg.text)
+          maybeRoute(msg.text)
           break
 
         case 'transcript.user':
           addLine('you', msg.text)
+          maybeRoute(msg.text, true)
           break
 
         // Word-level, aligned to the audio as it plays — so the caption keeps
@@ -590,6 +648,7 @@ async function call() {
         // sentence underneath it.
         case 'transcript.agent':
           finishedReply = msg.reply_id ?? finishedReply
+          lastAgentText = msg.text || ''
           dropAgentPartial()
           addLine('agent', msg.text)
           break
@@ -662,6 +721,11 @@ function reset() {
   // selection survives; the next call re-applies it at session.ready.
   liveMode = null
   sessionId = null
+  pinned = false
+  routeBusy = false
+  routedText = ''
+  lastAgentText = ''
+  highlight(selectedMode)
   $('btn').disabled = false
   $('btn').textContent = 'Start call'
   $('btn').classList.remove('live')
