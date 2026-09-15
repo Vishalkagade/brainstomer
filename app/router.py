@@ -120,6 +120,14 @@ def keyterm_index(conn) -> dict[str, set[str]]:
     return index
 
 
+FILLERS = re.compile(r"(?:,\s*)?\b(uh|um|umm|uhh|erm|hmm)\b[,.]?", re.IGNORECASE)  # only sounds, never words like "like"
+
+
+def strip_fillers(text: str) -> str:
+    """'Uh, suggest me, uh, best places' -> 'suggest me best places'. Fillers carry no topic."""
+    return re.sub(r"\s+", " ", FILLERS.sub(" ", text)).strip(" ,")
+
+
 def keyterm_hits(text: str, index: dict[str, set[str]]) -> dict[str, list[str]]:
     """mode -> the terms from that mode found in text, counting only terms unique to one mode."""
     lowered = f" {re.sub(r'[^a-z0-9 ]+', ' ', text.lower())} "
@@ -141,6 +149,7 @@ def decide(text: str, live_mode: str | None, fingerprints: dict, index: dict,
     'filler' = the acknowledgement anchor won: say nothing, change nothing.
     'unknown' = general won: none of the real modes fits; the words are worth remembering.
     """
+    text = strip_fillers(text)
     words = text.split()
     if len(words) < MIN_WORDS:
         return {"mode": live_mode, "switch": False, "signal": "too_short", "scores": {}, "terms": []}

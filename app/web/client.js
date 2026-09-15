@@ -175,6 +175,9 @@ let routeBusy = false  // one /route in flight at a time
 let lastRouteAt = 0
 let routedText = ''    // last text we asked about; do not ask twice for the same words
 let lastAgentText = '' // what the agent last said; if 'you' say the same words, that is the speaker leaking into the mic
+let pendingFinal = null // a final transcript that arrived while an ask was in flight; sent right after
+let recapSent = new Set() // modes whose memory was already injected this call; once is enough
+let lastRoutedWords = 0  // how many words the last partial ask had; ask again only when it grew
 let modesById = {}
 
 $('btn').onclick = () => (ws?.readyState <= 1 ? hangUp() : call())
@@ -443,14 +446,18 @@ function looksLikeEcho(text) {
 }
 
 async function maybeRoute(text, final = false) {
-  if (!sessionId || pinned || routeBusy) return
+  if (!sessionId || pinned) return
+  if (routeBusy) { if (final) pendingFinal = text; return }   // never drop a final: it is the one that saves a candidate
   if (text.trim().split(/\s+/).length < 4) return
   if (looksLikeEcho(text)) return
-  if (text === routedText) return
-  if (!final && Date.now() - lastRouteAt < 1000) return
+  const words = text.trim().split(/\s+/).length
+  if (!final && text === routedText) return                    // a final may repeat the last partial word for word; still send it
+  if (!final && words - lastRoutedWords < 3) return             // ask again only when the sentence grew by three words
+  if (!final && Date.now() - lastRouteAt < 1500) return
   routeBusy = true
   lastRouteAt = Date.now()
   routedText = text
+  lastRoutedWords = words
   try {
     const res = await fetch('/route', {
       method: 'POST',
@@ -461,16 +468,17 @@ async function maybeRoute(text, final = false) {
     if (res.ok && d.switch && !pinned && d.mode && d.mode !== liveMode) {
       if (d.spawned) await loadModes(true)   // the new mode needs a button before it can be highlighted
       selectedMode = d.mode
-      await applyMode(d.mode, d.spawned ? 'spawner' : 'router')
+      await applyMode(d.mode, d.spawned ? 'spawner' : 'router', d.recap)
     }
   } catch (err) {
     // routing is best effort; the call goes on in the current mode
   } finally {
     routeBusy = false
+    if (pendingFinal) { const t = pendingFinal; pendingFinal = null; maybeRoute(t, true) }
   }
 }
 
-async function applyMode(id, source = 'manual') {
+async function applyMode(id, source = 'manual', recap = undefined) {
   const profile = await (await fetch(`/profile?mode=${encodeURIComponent(id)}`)).json()
   if (profile.error) return fail(profile.error)
 
@@ -479,6 +487,13 @@ async function applyMode(id, source = 'manual') {
   send({ type: 'session.update', session: profile.session })
   liveMode = id
   logSwitch(id, profile.version_id, source)
+  // what this mode remembers: on a router switch, the past exchanges closest to what you just said;
+  // on a button click there are no words to match, so the most recent ones. One message, once per mode per call.
+  const memoryText = recap !== undefined ? recap : profile.recap
+  if (memoryText && !recapSent.has(id)) {
+    send({ type: 'conversation.message', role: 'system', content: memoryText })
+    recapSent.add(id)
+  }
   highlight(id)
 
   const listen = profile.session.input
@@ -725,6 +740,9 @@ function reset() {
   routeBusy = false
   routedText = ''
   lastAgentText = ''
+  pendingFinal = null
+  recapSent = new Set()
+  lastRoutedWords = 0
   highlight(selectedMode)
   $('btn').disabled = false
   $('btn').textContent = 'Start call'

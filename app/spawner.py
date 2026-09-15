@@ -1,7 +1,7 @@
 """Create a new mode while the conversation is still going.
 
     .venv/bin/python app/spawner.py sweep                 provisional -> established / archived, by use
-    .venv/bin/python app/spawner.py name "t1" "t2" "t3"   dry run: what would these utterances be called
+    .venv/bin/python app/spawner.py name "t1" "t2" "t3"   dry run: which of these group with the last, and the name
 
 When three utterances in one call land in General and are about the same thing,
 that is a topic, not a stray question. A provisional mode is created on the spot
@@ -25,7 +25,7 @@ import profiles  # noqa: E402
 import router  # noqa: E402
 import store  # noqa: E402
 
-SIMILAR = 0.55      # two utterances this close are the same topic (same-topic pairs 0.63-0.68, cross-topic <= 0.50)
+RELATED = 0.40      # cheap gate: only ask the model when the newest utterance is at least this close to another one
 MIN_CLUSTER = 3     # utterances about one thing, in one call, before a mode is spawned
 ESTABLISH_AFTER = 3  # distinct calls that used a provisional mode before it counts as established
 ARCHIVE_AFTER = 5    # calls since creation with no use: the button fades away
@@ -52,9 +52,10 @@ Everything in the user core above still applies: how he thinks, how he wants
 answers shaped, what has already been corrected."""
 
 
-def cluster(newest: dict, others: list[dict], similar: float = SIMILAR) -> list[dict]:
-    """The newest utterance plus every earlier one close enough to be the same topic."""
-    close = [c for c in others if c["id"] != newest["id"] and router.cosine(newest["vector"], c["vector"]) >= similar]
+def related(newest: dict, others: list[dict], threshold: float = RELATED) -> list[dict]:
+    """The newest utterance plus every earlier one loosely close to it. A gate, not a verdict:
+    raw similarity called finance and clothes the same (0.56) and clothes and shoes different (0.45)."""
+    close = [c for c in others if c["id"] != newest["id"] and router.cosine(newest["vector"], c["vector"]) >= threshold]
     return close + [newest]
 
 
@@ -70,17 +71,26 @@ def unique_id(conn, base: str) -> str:
     return candidate
 
 
-def name_topic(texts: list[str]) -> tuple[dict, str]:
-    """Ask a fast model for a name, an about line and keyterms. Returns (fields, model id)."""
+def group_and_name(texts: list[str]) -> tuple[dict, str]:
+    """One call, two jobs: which of these sentences share a subject with the LAST one, and what is it.
+
+    Returns (fields, model id). fields["same"] holds 1-based indices of the sentences that belong with the
+    last one (the last one included). Grouping by a model instead of by similarity is what lets clothes,
+    shoes and jackets become "Shopping" while finance advice stays out.
+    """
     key = config.require("FIREWORKS_API_KEY", "https://app.fireworks.ai/settings/users/api-keys")
+    numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts, 1))
     ask = [
         {"role": "system", "content":
-            "You name topics for a personal voice assistant. Given what a person said, return ONLY a JSON object: "
-            '{"name": <2-3 word title, e.g. "Hair care">, '
+            "You organise what a person says to a personal voice assistant into subjects. You get numbered sentences "
+            "from one conversation. Decide which sentences are about the SAME broad subject as the LAST sentence "
+            "(for example: buying clothes, buying shoes and buying jackets are one subject, shopping; asking for "
+            "finance advice is not). Return ONLY a JSON object: "
+            '{"same": [<1-based numbers of every sentence on that subject, including the last one>], '
+            '"name": <2-3 word title for that subject, e.g. "Shopping">, '
             '"about": <one sentence naming the subject matter, concrete and topical, no advice>, '
-            '"keyterms": [<up to 10 domain-specific nouns or names a transcriber might mishear, e.g. "mascarpone", '
-            '"springform"; never everyday words like "lighter", "healthy", "product">]}'},
-        {"role": "user", "content": "\n".join(f"- {t}" for t in texts)},
+            '"keyterms": [<up to 10 domain-specific nouns or names a transcriber might mishear; never everyday words>]}'},
+        {"role": "user", "content": numbered},
     ]
     failures = []
     for model in NAMING_MODELS:
@@ -94,8 +104,11 @@ def name_topic(texts: list[str]) -> tuple[dict, str]:
         raw = response.json()["choices"][0]["message"]["content"] or ""
         body = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", raw.strip())
         data = json.loads(body)
-        return clean_fields(data), model
-    raise SystemExit("No naming model answered: " + ", ".join(failures))
+        fields = clean_fields(data)
+        same = data.get("same") if isinstance(data.get("same"), list) else []
+        fields["same"] = sorted({int(i) for i in same if str(i).isdigit() and 1 <= int(i) <= len(texts)} | {len(texts)})
+        return fields, model
+    raise SystemExit("No grouping model answered: " + ", ".join(failures))
 
 
 def clean_fields(data: dict) -> dict:
@@ -123,15 +136,14 @@ def default_settings(mode_id: str, fields: dict) -> dict:
     }
 
 
-def spawn(conn, session_id: str, members: list[dict], name_fn=name_topic) -> str:
-    """Create the provisional mode from a cluster and hand it the candidates. Returns the new mode id."""
+def spawn(conn, session_id: str, members: list[dict], fields: dict, model: str) -> str:
+    """Create the provisional mode from a group and hand it the candidates. Returns the new mode id."""
     texts = [m["text"] for m in members]
-    fields, model = name_fn(texts)
     mode_id = unique_id(conn, slug(fields["name"]))
     prompt = TEMPLATE.format(about=fields["about"])
     profiles.check_cap("l2", prompt)
-    rationale = (f"Spawned mid-call from {len(texts)} utterances in session {session_id} that clustered "
-                 f"(similarity >= {SIMILAR}). Vanilla template prompt; named by {model.rsplit('/', 1)[-1]}.\n\n"
+    rationale = (f"Spawned mid-call from {len(texts)} utterances in session {session_id} that "
+                 f"{model.rsplit('/', 1)[-1]} grouped as one subject. Vanilla template prompt.\n\n"
                  + "\n".join(f"- {t}" for t in texts))
     store.add_mode(conn, mode_id, fields["name"], default_settings(mode_id, fields), prompt,
                    rationale, source="spawner", status="provisional")
@@ -140,16 +152,22 @@ def spawn(conn, session_id: str, members: list[dict], name_fn=name_topic) -> str
     return mode_id
 
 
-def maybe_spawn(conn, session_id: str, newest_id: int, name_fn=name_topic) -> str | None:
-    """After a candidate is saved: is this call now three-deep on one topic? Then spawn."""
+def maybe_spawn(conn, session_id: str, newest_id: int, group_fn=group_and_name) -> str | None:
+    """After a candidate is saved: is this call now three-deep on one subject? Then spawn.
+
+    The model is asked only when the cheap gate passes: at least MIN_CLUSTER unclaimed candidates in the
+    call, and the newest loosely related to at least MIN_CLUSTER-1 of them. One model call at most per
+    saved candidate, and none for the first two.
+    """
     rows = store.session_candidates(conn, session_id)
     newest = next((r for r in rows if r["id"] == newest_id), None)
-    if newest is None:
+    if newest is None or len(rows) < MIN_CLUSTER or len(related(newest, rows)) < MIN_CLUSTER:
         return None
-    members = cluster(newest, rows)
+    fields, model = group_fn([r["text"] for r in rows])  # newest is last, by id order
+    members = [rows[i - 1] for i in fields["same"]]
     if len(members) < MIN_CLUSTER:
         return None
-    return spawn(conn, session_id, members, name_fn=name_fn)
+    return spawn(conn, session_id, members, fields, model)
 
 
 def sweep(conn) -> list[str]:
@@ -175,8 +193,8 @@ def main() -> None:
         raise SystemExit('Usage: app/spawner.py sweep   |   app/spawner.py name "t1" "t2" ...')
     config.load_env()
     if sys.argv[1] == "name":
-        fields, model = name_topic(sys.argv[2:])
-        print(json.dumps(fields, indent=2), f"\n(named by {model.rsplit('/', 1)[-1]}; id would be '{slug(fields['name'])}')")
+        fields, model = group_and_name(sys.argv[2:])
+        print(json.dumps(fields, indent=2), f"\n(by {model.rsplit('/', 1)[-1]}; id would be '{slug(fields['name'])}')")
         return
     with closing(store.connect()) as conn:
         for note in sweep(conn) or ["no provisional modes"]:

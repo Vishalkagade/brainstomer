@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +26,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import memory  # noqa: E402
 import profiles  # noqa: E402
 import router  # noqa: E402
 import spawner  # noqa: E402
@@ -54,6 +56,15 @@ def mint_token() -> dict:
     return response.json()
 
 
+def refresh_recaps() -> None:
+    """Rebuild every mode's memory from AssemblyAI. Slow (one fetch per past call), so never inline."""
+    try:
+        with closing(store.connect()) as conn, httpx.Client(headers=config.headers(), timeout=30) as client:
+            memory.refresh_all(conn, client)
+    except Exception as err:  # memory is a nicety; a failure here must not touch the call
+        print(f"recap refresh failed: {err}")
+
+
 class Handler(BaseHTTPRequestHandler):
     # Keep-alive, so the page's fetches reuse one connection.
     protocol_version = "HTTP/1.1"
@@ -71,6 +82,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Which modes exist, for the buttons on the page.
         if path == "/profiles":
+            threading.Thread(target=refresh_recaps, daemon=True).start()  # page load: rebuild memory off the reply path
             modes = []
             for name in profiles.list_modes():
                 profile = profiles.assemble(name)
@@ -97,7 +109,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, b'{"error":"no such mode"}', "application/json")
                 return
             try:
-                body = json.dumps(profiles.assemble(mode)).encode()
+                profile = profiles.assemble(mode)
+                with closing(store.connect()) as conn:
+                    profile["recap"] = memory.cached(conn, mode)  # cached only; never fetched while a swap waits
+                body = json.dumps(profile).encode()
             except SystemExit as err:
                 # A layer over its token cap. Surface it to the page rather than
                 # killing the server.
@@ -183,11 +198,14 @@ class Handler(BaseHTTPRequestHandler):
                 vector = decision.pop("_vector", None)  # 4096 floats: for the store, not for the page
                 if decision["signal"] == "unknown" and body.get("final"):  # once per utterance, not per partial
                     cid = store.add_candidate(conn, router.GENERAL, body["session_id"], "unknown_topic", text, vector)
-                    new_mode = spawner.maybe_spawn(conn, body["session_id"], cid, name_fn=spawner.name_topic)
+                    new_mode = spawner.maybe_spawn(conn, body["session_id"], cid, group_fn=spawner.group_and_name)
                     if new_mode:
                         live = store.current(conn, new_mode)
                         decision.update(mode=new_mode, switch=True, signal="spawned",
                                         spawned={"id": new_mode, "name": live["name"]})
+                if decision["switch"] and vector is not None:
+                    # memory that matches these words, not just the latest: the vector is already paid for
+                    decision["recap"] = memory.relevant(conn, decision["mode"], vector, exclude_session=body["session_id"])
                 if decision["signal"] not in ("too_short", "no_fingerprints"):
                     store.log_route(conn, body["session_id"], int(body.get("ts_ms") or 0), text, live_mode, decision)
         except (Exception, SystemExit) as err:  # a routing failure must never take the call down; the page just stays put

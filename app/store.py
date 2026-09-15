@@ -81,6 +81,24 @@ CREATE TABLE IF NOT EXISTS anchors (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS recaps (
+    mode_id    TEXT PRIMARY KEY REFERENCES modes(id),
+    text       TEXT NOT NULL,                 -- what the page injects on switching into the mode; '' = nothing yet
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exchanges (
+    id         INTEGER PRIMARY KEY,
+    mode_id    TEXT NOT NULL REFERENCES modes(id),
+    session_id TEXT NOT NULL,
+    ts_ms      INTEGER NOT NULL,
+    user_text  TEXT NOT NULL,
+    agent_text TEXT NOT NULL,
+    vector     TEXT NOT NULL,                 -- embedding of user_text, so a switch can recall the closest past exchanges
+    created_at TEXT NOT NULL,
+    UNIQUE (mode_id, session_id, ts_ms)
+);
+
 CREATE TABLE IF NOT EXISTS candidates (
     id         INTEGER PRIMARY KEY,
     mode_id    TEXT NOT NULL REFERENCES modes(id),
@@ -241,6 +259,27 @@ def claim_candidates(conn: sqlite3.Connection, ids: list[int], mode_id: str) -> 
     """Hand candidates to the mode they spawned; they stop counting toward another spawn."""
     conn.executemany("UPDATE candidates SET mode_id = ? WHERE id = ?", [(mode_id, i) for i in ids])
     conn.commit()
+
+
+def add_exchanges(conn: sqlite3.Connection, mode_id: str, rows: list[dict]) -> int:
+    """Store past exchanges with their vectors. Duplicates (same mode, session, time) are ignored."""
+    cursor = conn.executemany(
+        "INSERT OR IGNORE INTO exchanges (mode_id, session_id, ts_ms, user_text, agent_text, vector, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(mode_id, r["session_id"], r["ts_ms"], r["user_text"], r["agent_text"], json.dumps(r["vector"]), now()) for r in rows])
+    conn.commit()
+    return cursor.rowcount
+
+
+def exchanges_for(conn: sqlite3.Connection, mode_id: str) -> list[dict]:
+    rows = conn.execute("SELECT session_id, ts_ms, user_text, agent_text, vector FROM exchanges WHERE mode_id = ? "
+                        "ORDER BY ts_ms", (mode_id,)).fetchall()
+    return [dict(r, vector=json.loads(r["vector"])) for r in rows]
+
+
+def exchange_sessions(conn: sqlite3.Connection, mode_id: str) -> set[str]:
+    """Sessions already embedded for this mode, so a refresh only pays for new ones."""
+    return {r[0] for r in conn.execute("SELECT DISTINCT session_id FROM exchanges WHERE mode_id = ?", (mode_id,))}
 
 
 def set_status(conn: sqlite3.Connection, mode_id: str, status: str) -> None:
