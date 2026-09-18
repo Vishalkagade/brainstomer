@@ -121,12 +121,12 @@ def clean_fields(data: dict) -> dict:
 
 
 def default_settings(mode_id: str, fields: dict) -> dict:
-    """A vanilla profile: neutral listening, no tools, quick to evolve. Hue from the id so it is stable."""
+    """A vanilla profile: neutral listening, web search, quick to evolve. Hue from the id so it is stable."""
     return {
         "name": fields["name"],
         "about": fields["about"],
         "hue": int(hashlib.md5(mode_id.encode()).hexdigest(), 16) % 360,
-        "tools": [],
+        "tools": ["web_search"],  # a new subject usually needs a lookup before it needs a style
         "history_depth": 10,
         "model": None,
         "turn_detection": {"min_silence": 800, "max_silence": 2000, "interrupt_response": True, "interruption_delay": 300},

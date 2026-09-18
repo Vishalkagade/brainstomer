@@ -135,6 +135,9 @@
       transition: color .25s, border-color .25s, background-color .25s;
     }
     .mode:hover { color: var(--text); }
+    .mode small { font-weight: 400; opacity: .6; margin-left: 6px; }
+    .meta a { color: var(--dim); text-decoration: none; }
+    .meta a:hover { color: var(--accent); }
     .mode.pinned::after {
       content: ' •';           /* hand on the wheel: router is muted for this call */
       opacity: .7;
@@ -258,6 +261,8 @@
         <span id="status-text">idle</span>
         <span class="sep">/</span>
         <span id="elapsed">0:00</span>
+        <span class="sep">/</span>
+        <a id="evolution-link" href="/evolution" target="_blank">how it changed</a>
       </div>
     </div>
 

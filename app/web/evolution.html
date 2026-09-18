@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Brainstormer · evolution</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap" rel="stylesheet" />
+  <style>
+    /* Same tokens as the call page: the accent belongs to the mode, not the brand. */
+    :root {
+      --hue: 190;
+      --ink: #0c1319;
+      --ink-lift: #111b23;
+      --rule: #1e2c36;
+      --text: #d6e2ea;
+      --dim: #6f8697;
+      --accent: hsl(var(--hue) 85% 62%);
+      --accent-soft: hsl(var(--hue) 70% 62% / 0.16);
+      --accent-line: hsl(var(--hue) 60% 55% / 0.4);
+      --gone: hsl(4 70% 66%);
+      --gone-soft: hsl(4 70% 60% / 0.13);
+      --came: hsl(150 55% 60%);
+      --came-soft: hsl(150 55% 55% / 0.13);
+      --ui: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+      --read: "Newsreader", Georgia, serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      background: var(--ink); color: var(--text);
+      font: 400 15px/1.5 var(--ui);
+      -webkit-font-smoothing: antialiased;
+      display: flex; justify-content: center;
+      padding: 28px 20px 80px;
+    }
+    main { width: 100%; max-width: 1040px; }
+
+    .head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding-bottom: 14px; }
+    .wordmark { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+    .wordmark span { color: var(--dim); font-weight: 400; }
+    .head a { color: var(--dim); font-size: 13px; text-decoration: none; }
+    .head a:hover { color: var(--accent); }
+
+    .modes { display: flex; gap: 6px; flex-wrap: wrap; padding-bottom: 22px; border-bottom: 1px solid var(--rule); }
+    .mode {
+      font: 500 13px var(--ui); background: transparent; color: var(--dim);
+      border: 1px solid var(--rule); border-radius: 999px; padding: 7px 15px; cursor: pointer;
+      transition: color .25s, border-color .25s, background-color .25s;
+    }
+    .mode:hover { color: var(--text); }
+    .mode.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+    .mode small { color: var(--dim); font-weight: 400; margin-left: 6px; }
+
+    .layout { display: grid; grid-template-columns: 250px 1fr; gap: 40px; padding-top: 26px; }
+    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; gap: 24px; } }
+
+    /* --- timeline: one node per version, newest on top -------------------- */
+    .timeline { list-style: none; margin: 0; padding: 0; position: relative; }
+    .timeline::before { content: ""; position: absolute; left: 6px; top: 10px; bottom: 10px; width: 1px; background: var(--rule); }
+    .node { position: relative; padding: 0 0 22px 28px; cursor: pointer; }
+    .node::before {
+      content: ""; position: absolute; left: 1px; top: 6px; width: 11px; height: 11px; border-radius: 50%;
+      background: var(--ink); border: 1px solid var(--dim); transition: all .25s;
+    }
+    .node.live::before { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+    .node.proposed::before { border-style: dashed; border-color: var(--accent); }
+    .node.on .n { color: var(--accent); }
+    .node .n { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .node .tag { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin-left: 8px; }
+    .node.live .tag, .node.proposed .tag { color: var(--accent); }
+    .node .when { font-size: 12.5px; color: var(--dim); }
+    .node button {
+      margin-top: 8px; font: 500 12px var(--ui); color: var(--accent); background: transparent;
+      border: 1px solid var(--accent-line); border-radius: 999px; padding: 5px 12px; cursor: pointer;
+    }
+    .node button:hover { background: var(--accent-soft); }
+    .node button.armed { color: var(--ink); background: var(--accent); }
+
+    /* --- the change ------------------------------------------------------- */
+    .title { font-size: 22px; font-weight: 500; letter-spacing: -0.02em; margin: 0; font-variant-numeric: tabular-nums; }
+    .title .arrow { color: var(--dim); margin: 0 6px; }
+    .sub { font-size: 13px; color: var(--dim); margin: 2px 0 0; }
+    .sub a { color: var(--dim); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; margin-right: 10px; }
+    .sub a.on { color: var(--accent); text-decoration: none; }
+
+    h2 { font: 500 11px var(--ui); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); margin: 30px 0 10px; }
+    .why { font: 400 18px/1.55 var(--read); margin: 0; max-width: 62ch; white-space: pre-wrap; }
+
+    .rows { border-top: 1px solid var(--rule); }
+    .row { display: grid; grid-template-columns: 170px 1fr; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--rule); font-variant-numeric: tabular-nums; }
+    .row .k { color: var(--dim); font-size: 13px; padding-top: 1px; }
+    .row .old { color: var(--dim); text-decoration: line-through; text-decoration-color: var(--gone); }
+    .row .to { color: var(--dim); margin: 0 8px; }
+    .row .delta { color: var(--accent); font-size: 12.5px; margin-left: 10px; }
+    .chip { display: inline-block; font-size: 12.5px; border-radius: 999px; padding: 2px 10px; margin: 2px 6px 2px 0; }
+    .chip.add { color: var(--came); background: var(--came-soft); }
+    .chip.del { color: var(--gone); background: var(--gone-soft); text-decoration: line-through; }
+
+    .para { font: 400 16.5px/1.6 var(--read); margin: 0 0 12px; padding: 2px 0 2px 14px; border-left: 2px solid transparent; max-width: 68ch; }
+    .para.same { color: var(--dim); }
+    .para.del { border-color: var(--gone); color: hsl(4 30% 78%); }
+    .para.add { border-color: var(--came); }
+    .para.del mark { background: var(--gone-soft); color: var(--gone); text-decoration: line-through; border-radius: 3px; }
+    .para.add mark { background: var(--came-soft); color: var(--came); border-radius: 3px; }
+    .para.del.whole { background: var(--gone-soft); }
+    .para.add.whole { background: var(--came-soft); }
+
+    .note { color: var(--dim); font-size: 13.5px; }
+    #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--ink-lift); border: 1px solid var(--accent-line);
+             color: var(--text); font-size: 13.5px; padding: 10px 18px; border-radius: 999px; opacity: 0; transition: opacity .3s; pointer-events: none; }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="head">
+      <h1 class="wordmark">Brainstormer <span>/ how each mode changed</span></h1>
+      <a href="/">back to the call</a>
+    </div>
+    <div class="modes" id="modes"></div>
+    <div class="layout">
+      <ol class="timeline" id="timeline"></ol>
+      <section id="change"><p class="note">Loading.</p></section>
+    </div>
+  </main>
+  <div id="toast"></div>
+  <script src="/evolution.js"></script>
+</body>
+</html>

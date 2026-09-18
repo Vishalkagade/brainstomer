@@ -28,7 +28,7 @@ EMBED_MODELS = [  # ordered; first that answers is used. Fireworks availability 
 ]
 MIN_WORDS = 4      # shorter than this is not routed at all ("yes", "next set")
 MARGIN = 0.05      # winner must beat the live mode's score by this much to cause a switch; a guess until measured
-MARGIN_TO_GENERAL = 0.10  # falling back to general is a demotion, so it needs a clearer win than moving to a topic
+MARGIN_TO_GENERAL = 0.15  # falling back to general is a demotion. Measured 18 Sep: wrong exits had gaps 0.10-0.13, real ones 0.17+
 GENERAL = "general"  # the landing mode; its fingerprint is its about line, so everyday topics win it outright
 FILLER = "filler"    # not a mode: an anchor for acknowledgements. When it wins, nothing changes.
 FILLER_TEXT = ("Filler and acknowledgements: okay, I understand, yes, that makes sense, thank you, "
@@ -141,13 +141,14 @@ def keyterm_hits(text: str, index: dict[str, set[str]]) -> dict[str, list[str]]:
 
 
 def decide(text: str, live_mode: str | None, fingerprints: dict, index: dict,
-           embed_fn=embed, margin: float = MARGIN) -> dict:
+           embed_fn=embed, margin: float = MARGIN, final: bool = True) -> dict:
     """The whole decision, as a dict the page can act on and the log can keep.
 
     signal: 'too_short' | 'keyterm' | 'no_fingerprints' | 'filler' | 'unknown' | 'embedding'
     switch: True only when the page should change mode.
     'filler' = the acknowledgement anchor won: say nothing, change nothing.
     'unknown' = general won: none of the real modes fits; the words are worth remembering.
+    final: False while he is still talking. A partial may move INTO a topic, never out to general.
     """
     text = strip_fillers(text)
     words = text.split()
@@ -175,6 +176,8 @@ def decide(text: str, live_mode: str | None, fingerprints: dict, index: dict,
     live_score = scores.get(live_mode, -1.0)
     needed = max(margin, MARGIN_TO_GENERAL) if winner == GENERAL else margin
     switch = winner != live_mode and scores[winner] - live_score >= needed
+    if winner == GENERAL and not final:  # half a sentence has no topic words yet; leaving early buys nothing
+        switch = False
     signal = "unknown" if winner == GENERAL else "embedding"
     return {"mode": winner if switch else live_mode, "switch": switch, "signal": signal,
             "scores": scores, "terms": [], "embed_ms": embed_ms,

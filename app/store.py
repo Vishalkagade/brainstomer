@@ -14,7 +14,9 @@ Old versions are never changed. A new version is added, then the pointer is move
 That makes rollback easy: only one value needs to be updated.
 """
 
+import difflib
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -201,7 +203,6 @@ def version(conn: sqlite3.Connection, version_id: int) -> dict:
 
 def diff(conn: sqlite3.Connection, old_id: int, new_id: int) -> str:
     """Unified diff of two versions, settings first then prompt. Empty string means identical."""
-    import difflib
     a, b = version(conn, old_id), version(conn, new_id)
 
     def as_lines(v: dict) -> list[str]:
@@ -210,6 +211,88 @@ def diff(conn: sqlite3.Connection, old_id: int, new_id: int) -> str:
         as_lines(a), as_lines(b),
         fromfile=f"{a['mode_id']} v{a['n']} ({a['source']})",
         tofile=f"{b['mode_id']} v{b['n']} ({b['source']})", n=2))
+
+
+def history(conn: sqlite3.Connection, mode_id: str) -> list[dict]:
+    """Every version of one mode, oldest first, with `live` marking the one in use."""
+    live = conn.execute("SELECT current_version_id FROM modes WHERE id = ?", (mode_id,)).fetchone()
+    if live is None:
+        raise SystemExit(f"No mode '{mode_id}'")
+    rows = conn.execute(
+        "SELECT v.id, v.n, v.source, v.created_at, v.rationale, "
+        "       (SELECT COUNT(DISTINCT session_id) FROM switches s WHERE s.version_id = v.id) AS calls "  # 0 = never ran in a call
+        "FROM versions v WHERE v.mode_id = ? ORDER BY v.n", (mode_id,))
+    return [dict(r) | {"live": r["id"] == live[0]} for r in rows]
+
+
+def flatten(settings: dict, prefix: str = "") -> dict:
+    """{"turn_detection": {"max_silence": 4000}} -> {"turn_detection.max_silence": 4000}. Lists stay whole."""
+    flat = {}
+    for key, value in settings.items():
+        if isinstance(value, dict):
+            flat |= flatten(value, f"{prefix}{key}.")
+        else:
+            flat[f"{prefix}{key}"] = value
+    return flat
+
+
+def paragraphs(prompt: str) -> list[str]:
+    """Blank-line separated, whitespace collapsed: a re-wrapped paragraph is not a changed paragraph."""
+    return [" ".join(p.split()) for p in re.split(r"\n\s*\n", prompt) if p.strip()]
+
+
+def word_parts(old: str, new: str) -> tuple[list[dict], list[dict]]:
+    """Two paragraphs as [{t, hit}] runs; hit marks the words only that side has."""
+    a, b = re.findall(r"\S+|\s+", old), re.findall(r"\S+|\s+", new)
+    left, right = [], []
+    for op, a0, a1, b0, b1 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if a1 > a0:
+            left.append({"t": "".join(a[a0:a1]), "hit": op != "equal"})
+        if b1 > b0:
+            right.append({"t": "".join(b[b0:b1]), "hit": op != "equal"})
+    return left, right
+
+
+SAME_PARAGRAPH = 0.4  # below this two paragraphs are unrelated; word highlights would be confetti
+
+
+def prompt_ops(old: str, new: str) -> list[dict]:
+    """The prompt change as a list of {op: same|del|add, parts}. A rewritten paragraph is a del followed by an add."""
+    a, b = paragraphs(old), paragraphs(new)
+    whole = lambda op, text: {"op": op, "parts": [{"t": text, "hit": False}]}
+    ops = []
+    for op, a0, a1, b0, b1 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            ops += [whole("same", p) for p in a[a0:a1]]
+            continue
+        paired = min(a1 - a0, b1 - b0) if op == "replace" else 0
+        for i in range(paired):
+            before, after = a[a0 + i], b[b0 + i]
+            if difflib.SequenceMatcher(None, before, after).ratio() >= SAME_PARAGRAPH:
+                left, right = word_parts(before, after)
+                ops += [{"op": "del", "parts": left}, {"op": "add", "parts": right}]
+            else:
+                ops += [whole("del", before), whole("add", after)]
+        ops += [whole("del", p) for p in a[a0 + paired:a1]]
+        ops += [whole("add", p) for p in b[b0 + paired:b1]]
+    return ops
+
+
+def changes(conn: sqlite3.Connection, old_id: int, new_id: int) -> dict:
+    """What differs between two versions, shaped for the page. Same facts as diff(), not the same form."""
+    a, b = version(conn, old_id), version(conn, new_id)
+    fa, fb = flatten(a["settings"]), flatten(b["settings"])
+    rows = []
+    for key in list(fb) + [k for k in fa if k not in fb]:
+        old, new = fa.get(key), fb.get(key)
+        if old == new:
+            continue
+        if isinstance(old, list) and isinstance(new, list):  # keyterms, tools: show the items, not two long lists
+            rows.append({"key": key, "added": [x for x in new if x not in old],
+                         "removed": [x for x in old if x not in new]})
+        else:
+            rows.append({"key": key, "old": old, "new": new})
+    return {"settings": rows, "prompt": prompt_ops(a["prompt"], b["prompt"])}
 
 
 def log_switch(conn: sqlite3.Connection, session_id: str, ts_ms: int,
@@ -347,10 +430,8 @@ def main() -> None:
     if argument == "history":
         if len(sys.argv) < 3:
             raise SystemExit("Which mode? e.g. app/store.py history gym")
-        live_id = conn.execute("SELECT current_version_id FROM modes WHERE id = ?", (sys.argv[2],)).fetchone()
-        for v in conn.execute("SELECT id, n, source, created_at, rationale FROM versions "
-                              "WHERE mode_id = ? ORDER BY n", (sys.argv[2],)):
-            mark = "LIVE" if live_id and v["id"] == live_id[0] else "    "
+        for v in history(conn, sys.argv[2]):
+            mark = "LIVE" if v["live"] else "    "
             first_line = v["rationale"].strip().splitlines()[0] if v["rationale"].strip() else ""
             print(f"{mark} v{v['n']:<3} id {v['id']:<4} {v['source']:<8} "
                   f"{v['created_at'][:16].replace('T', ' ')}  {first_line[:80]}")

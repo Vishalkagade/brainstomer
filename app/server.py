@@ -39,6 +39,8 @@ WEB = Path(__file__).resolve().parent / "web"
 # the moment between the page asking and the socket opening.
 TOKEN_TTL_SECONDS = 60
 
+READ_ONLY = os.environ.get("BRAINSTORMER_READ_ONLY") == "1"  # hosted demo: history visible, promote refused
+
 
 def mint_token() -> dict:
     """Ask AssemblyAI for a browser-safe credential.
@@ -63,6 +65,28 @@ def refresh_recaps() -> None:
             memory.refresh_all(conn, client)
     except Exception as err:  # memory is a nicety; a failure here must not touch the call
         print(f"recap refresh failed: {err}")
+
+
+def evolution_overview(conn) -> dict:
+    """Every mode with its version list, for the evolution page. One request draws the whole left side."""
+    modes = []
+    for m in store.list_modes(conn):
+        settings = store.current(conn, m["id"])["settings"]
+        modes.append({"id": m["id"], "name": m["name"], "status": m["status"],
+                      "hue": settings.get("hue", 190), "versions": store.history(conn, m["id"])})
+    return {"modes": modes, "can_promote": not READ_ONLY}
+
+
+def promote_version(conn, version_id: int, embed_one=None) -> dict:
+    """Move a mode's live pointer. The router fingerprint is re-embedded only if the words it is built from changed."""
+    target = store.version(conn, version_id)
+    before = router.fingerprint_text(store.current(conn, target["mode_id"]))
+    store.promote(conn, version_id)
+    after = router.fingerprint_text(store.current(conn, target["mode_id"]))
+    refreshed = before != after
+    if refreshed:
+        (embed_one or router.fingerprint_one)(conn, target["mode_id"])
+    return {"mode": target["mode_id"], "live": version_id, "n": target["n"], "fingerprint_refreshed": refreshed}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -94,6 +118,7 @@ class Handler(BaseHTTPRequestHandler):
                     "id": name,
                     "name": profile["name"],
                     "hue": profile["hue"],
+                    "version": profile["version"],  # shown on the button: "Gym v2"
                     "min_silence": turn["min_silence"],
                 })
             self._send(200, json.dumps({"modes": modes}).encode(), "application/json")
@@ -132,6 +157,31 @@ class Handler(BaseHTTPRequestHandler):
                            "application/json")
             return
 
+        if path == "/versions":
+            with closing(store.connect()) as conn:
+                self._send(200, json.dumps(evolution_overview(conn)).encode(), "application/json")
+            return
+
+        if path == "/changes":
+            query = parse_qs(parsed.query)
+            try:
+                old_id, new_id = int(query["old"][0]), int(query["new"][0])
+                with closing(store.connect()) as conn:
+                    body = store.changes(conn, old_id, new_id)
+            except (KeyError, ValueError, SystemExit) as err:  # missing, not a number, or no such version
+                self._send(400, json.dumps({"error": str(err)}).encode(), "application/json")
+                return
+            self._send(200, json.dumps(body).encode(), "application/json")
+            return
+
+        if path == "/evolution.js":
+            self._send(200, (WEB / "evolution.js").read_bytes(), "text/javascript")
+            return
+
+        if path == "/evolution":
+            self._send(200, (WEB / "evolution.html").read_bytes(), "text/html; charset=utf-8")
+            return
+
         if path == "/client.js":
             self._send(200, (WEB / "client.js").read_bytes(), "text/javascript")
             return
@@ -144,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802  (the base class names it this)
         path = urlparse(self.path).path
-        if path not in ("/tool", "/switch", "/route"):
+        if path not in ("/tool", "/switch", "/route", "/promote"):
             self._send(404, b'{"error":"no such endpoint"}', "application/json")
             return
 
@@ -159,6 +209,8 @@ class Handler(BaseHTTPRequestHandler):
             self._run_tool(body)
         elif path == "/switch":
             self._log_switch(body)
+        elif path == "/promote":
+            self._promote(body)
         else:
             self._route(body)
 
@@ -167,6 +219,23 @@ class Handler(BaseHTTPRequestHandler):
         # tools.run never raises and always returns a JSON string, handed on into tool.result unchanged
         result = tools.run(call.get("name", ""), call.get("arguments") or {})
         self._send(200, json.dumps({"result": result}).encode(), "application/json")
+
+    def _promote(self, body: dict) -> None:
+        """Make one version live. Rollback is the same request with an older id."""
+        if READ_ONLY:
+            self._send(403, b'{"error":"promotion is switched off on this server"}', "application/json")
+            return
+        try:
+            with closing(store.connect()) as conn:
+                result = promote_version(conn, int(body.get("version_id")))
+        except (TypeError, ValueError, SystemExit) as err:
+            self._send(400, json.dumps({"error": str(err)}).encode(), "application/json")
+            return
+        except Exception as err:  # the pointer moved but the embedding call failed: say so, do not hide it
+            self._send(502, json.dumps({"error": f"promoted, but fingerprint refresh failed: {err}"}).encode(),
+                       "application/json")
+            return
+        self._send(200, json.dumps(result).encode(), "application/json")
 
     def _log_switch(self, body: dict) -> None:
         """Record a profile swap. The browser is the only one who knows the session id and the moment."""
@@ -194,7 +263,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with closing(store.connect()) as conn:
                 decision = router.decide(text, live_mode, router.load_fingerprints(conn),
-                                         router.keyterm_index(conn), embed_fn=router.embed)  # passed at call time so tests can fake it
+                                         router.keyterm_index(conn), embed_fn=router.embed,  # passed at call time so tests can fake it
+                                         final=bool(body.get("final")))
                 vector = decision.pop("_vector", None)  # 4096 floats: for the store, not for the page
                 if decision["signal"] == "unknown" and body.get("final"):  # once per utterance, not per partial
                     cid = store.add_candidate(conn, router.GENERAL, body["session_id"], "unknown_topic", text, vector)

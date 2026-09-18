@@ -387,6 +387,9 @@ async function loadModes(refresh = false) {
     const button = document.createElement('button')
     button.className = 'mode'
     button.textContent = mode.name
+    const version = document.createElement('small')
+    version.textContent = `v${mode.version}`
+    button.append(version)
     button.dataset.id = mode.id
     button.onclick = () => selectMode(mode.id)
     $('modes').append(button)
@@ -396,6 +399,7 @@ async function loadModes(refresh = false) {
 }
 
 function highlight(id) {
+  $('evolution-link').href = `/evolution?mode=${id}`
   for (const button of $('modes').children) {
     button.classList.toggle('on', button.dataset.id === id)
     button.classList.toggle('pinned', pinned && button.dataset.id === id)
