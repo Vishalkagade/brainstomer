@@ -49,6 +49,24 @@
 
     main { width: 100%; max-width: 720px; }
 
+    /* The instrument never leaves the frame. Narrow: a compact strip stuck to
+       the top. Wide: a fixed stage beside the transcript. */
+    .stage { position: sticky; top: 0; z-index: 2; background: var(--ink); }
+    body.in-call .stage { border-bottom: 1px solid var(--rule); }
+    body.in-call #transcript { border-top: 0; }
+    body.in-call .controls { padding: 6px 0 12px; gap: 6px; }
+    body.in-call .instrument { max-height: 148px; }
+
+    @media (min-width: 980px) {
+      main { max-width: 1120px; }
+      .deck { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 64px; align-items: start; }
+      .stage { top: 28px; }
+      body.in-call .stage { border-bottom: 0; }
+      body.in-call .instrument { max-height: 300px; }
+      body.in-call .controls { padding: 18px 0 22px; gap: 10px; }
+      #transcript { border-top: 0; padding-top: 6px; }
+    }
+
     /* --- header: identity left, live state right ------------------------- */
 
     .head {
@@ -111,6 +129,9 @@
       line-height: 1.2;
     }
     .readout .figure .unit { font-size: 15px; color: var(--dim); font-weight: 400; }
+    .readout .caption { font-size: 11.5px; color: var(--dim); margin-top: 2px; }
+    body.in-call .readout .caption { display: none; }
+    @media (min-width: 980px) { body.in-call .readout .caption { display: block; } }
 
     /* --- controls --------------------------------------------------------- */
 
@@ -123,7 +144,7 @@
       padding: 18px 0 22px;
     }
 
-    .modes { display: flex; gap: 6px; }
+    .modes { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
     .mode {
       font: 500 13px var(--ui);
       background: transparent;
@@ -135,12 +156,30 @@
       transition: color .25s, border-color .25s, background-color .25s;
     }
     .mode:hover { color: var(--text); }
-    .mode small { font-weight: 400; opacity: .6; margin-left: 6px; }
+    .mode small { font-size: 11px; font-weight: 400; color: var(--dim); margin-left: 6px; }
     .meta a { color: var(--dim); text-decoration: none; }
     .meta a:hover { color: var(--accent); }
     .mode.pinned::after {
       content: ' •';           /* hand on the wheel: router is muted for this call */
       opacity: .7;
+    }
+    .mode.born { animation: born .7s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .mode.new::before {
+      content: 'new'; font-size: 11px; font-weight: 500; letter-spacing: .04em;
+      color: var(--ink); background: var(--accent); border-radius: 999px; padding: 1px 7px; margin-right: 7px;
+    }
+    @keyframes born {
+      from { opacity: 0; transform: scale(.6); filter: blur(4px); }
+      to   { opacity: 1; transform: scale(1);  filter: blur(0); }
+    }
+    .instrument::after {
+      content: ''; position: absolute; width: 62%; aspect-ratio: 1; border-radius: 50%;
+      border: 1px solid var(--accent); opacity: 0; pointer-events: none;
+    }
+    .instrument.birth::after { animation: wave 1.4s cubic-bezier(0.16, 1, 0.3, 1); }
+    @keyframes wave {
+      from { opacity: .9; transform: scale(.9); }
+      to   { opacity: 0;  transform: scale(1.7); }
     }
     .mode.on {
       color: var(--accent);
@@ -209,14 +248,17 @@
       font-weight: 500;
       transition: color .6s ease, border-color .6s ease;
     }
-    .switch .detail {
-      color: var(--dim);
-      display: block;
-      margin-top: 5px;
-      font-weight: 400;
-      font-variant-numeric: tabular-nums;
-      line-height: 1.6;
+    .switch .how { color: var(--dim); font-weight: 400; margin-left: 8px; }
+    .switch .why { display: block; margin-top: 4px; font: 400 15px/1.5 var(--read); color: var(--text); }
+    .switch .deltas {
+      display: flex; flex-wrap: wrap; gap: 4px 22px; margin-top: 8px;
+      font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums;
     }
+    .switch .deltas .was { color: var(--dim); font-weight: 400; text-decoration: line-through; margin-right: 2px; }
+    .switch .deltas .to { color: var(--dim); font-weight: 400; margin: 0 5px; }
+    .switch details { margin-top: 6px; color: var(--dim); font-weight: 400; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    .switch summary { cursor: pointer; width: fit-content; }
+    .switch details p { margin: 4px 0 0; line-height: 1.6; }
 
     /* A tool ran. This is machine activity, not conversation, so it is set in
        the instrument's face and sits in the speech column without a speaker
@@ -246,8 +288,13 @@
       .said { font-size: 16px; }
     }
 
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+    ::selection { background: var(--accent-soft); color: var(--text); }
+
     @media (prefers-reduced-motion: reduce) {
       * { transition-duration: .01ms !important; }
+      .mode.born { animation: none; }
+      .instrument.birth::after { animation: none; }
     }
   </style>
 </head>
@@ -266,20 +313,25 @@
       </div>
     </div>
 
-    <div class="instrument">
-      <canvas id="aura"></canvas>
-      <div class="readout">
-        <div class="doing" id="doing">not listening</div>
-        <div class="figure" id="figure">—</div>
+    <div class="deck">
+      <div class="stage">
+        <div class="instrument" id="instrument">
+          <canvas id="aura"></canvas>
+          <div class="readout">
+            <div class="doing" id="doing">not listening</div>
+            <div class="figure" id="figure">—</div>
+            <div class="caption">silence before it answers</div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <div class="modes" id="modes"></div>
+          <button id="btn">Start call</button>
+        </div>
       </div>
-    </div>
 
-    <div class="controls">
-      <div class="modes" id="modes"></div>
-      <button id="btn">Start call</button>
+      <div id="transcript" role="log" aria-live="polite"><p class="empty">Start the call, allow the microphone, and talk. Say what you are doing, for example "I am about to start my set", and the mode follows you.</p></div>
     </div>
-
-    <div id="transcript"><p class="empty">Start the call, allow the microphone, and talk.</p></div>
   </main>
 
   <script>window.AGENT_ID = "{{AGENT_ID}}"</script>

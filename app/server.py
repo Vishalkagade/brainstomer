@@ -272,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                     if new_mode:
                         live = store.current(conn, new_mode)
                         decision.update(mode=new_mode, switch=True, signal="spawned",
-                                        spawned={"id": new_mode, "name": live["name"]})
+                                        spawned={"id": new_mode, "name": live["name"], "about": live["settings"].get("about", "")})
                 if decision["switch"] and vector is not None:
                     # memory that matches these words, not just the latest: the vector is already paid for
                     decision["recap"] = memory.relevant(conn, decision["mode"], vector, exclude_session=body["session_id"])

@@ -177,6 +177,8 @@ let routedText = ''    // last text we asked about; do not ask twice for the sam
 let lastAgentText = '' // what the agent last said; if 'you' say the same words, that is the speaker leaking into the mic
 let pendingFinal = null // a final transcript that arrived while an ask was in flight; sent right after
 let recapSent = new Set() // modes whose memory was already injected this call; once is enough
+let lastProfile = null    // the profile before this swap, so the marker can say what changed
+let bornThisCall = new Set() // modes spawned in this call keep a 'new' tag until it ends
 let lastRoutedWords = 0  // how many words the last partial ask had; ask again only when it grew
 let modesById = {}
 
@@ -383,6 +385,8 @@ async function loadModes(refresh = false) {
   const { modes } = await (await fetch('/profiles')).json()
   $('modes').replaceChildren()
   for (const mode of modes) {
+    const isBorn = refresh && !modesById[mode.id]  // not on the page a moment ago
+    if (isBorn) bornThisCall.add(mode.id)
     modesById[mode.id] = mode
     const button = document.createElement('button')
     button.className = 'mode'
@@ -391,6 +395,8 @@ async function loadModes(refresh = false) {
     version.textContent = `v${mode.version}`
     button.append(version)
     button.dataset.id = mode.id
+    if (bornThisCall.has(mode.id)) button.classList.add('new')
+    if (isBorn) button.classList.add('born')
     button.onclick = () => selectMode(mode.id)
     $('modes').append(button)
   }
@@ -472,7 +478,7 @@ async function maybeRoute(text, final = false) {
     if (res.ok && d.switch && !pinned && d.mode && d.mode !== liveMode) {
       if (d.spawned) await loadModes(true)   // the new mode needs a button before it can be highlighted
       selectedMode = d.mode
-      await applyMode(d.mode, d.spawned ? 'spawner' : 'router', d.recap)
+      await applyMode(d.mode, d.spawned ? 'spawner' : 'router', d.recap, d.spawned?.about)
     }
   } catch (err) {
     // routing is best effort; the call goes on in the current mode
@@ -482,7 +488,7 @@ async function maybeRoute(text, final = false) {
   }
 }
 
-async function applyMode(id, source = 'manual', recap = undefined) {
+async function applyMode(id, source = 'manual', recap = undefined, about = '') {
   const profile = await (await fetch(`/profile?mode=${encodeURIComponent(id)}`)).json()
   if (profile.error) return fail(profile.error)
 
@@ -504,18 +510,34 @@ async function applyMode(id, source = 'manual', recap = undefined) {
   const td = listen.turn_detection
   aura.tune(profile.hue, td.min_silence)
   $('live-mode').textContent = profile.name
-  showSwitch(source === 'spawner' ? `new mode — ${profile.name}` : source === 'router' ? `${profile.name} (router)` : profile.name,
-    `silence ${td.min_silence}–${td.max_silence}ms · ` +
-    `barge-in delay ${td.interruption_delay}ms · ` +
-    `${listen.transcription_mode} · ` +
-    `${listen.keyterms.length} keyterms · ` +
-    // The toolset is part of what a swap changes, so it belongs in the proof.
-    `${profile.session.tools.length
-        ? 'tools: ' + profile.session.tools.map((tool) => tool.name).join(', ')
-        : 'no tools'} · ` +
-    `prompt ${profile.budget.total} tok ` +
-    `(l0 ${profile.budget.l0} + l1 ${profile.budget.l1} + l2 ${profile.budget.l2})`,
-    profile.hue)
+  const tools = (p) => p.session.tools.map((tool) => tool.name.replace('_', ' ')).join(', ') || 'none'
+  showSwitch({
+    name: profile.name,
+    how: source === 'spawner' ? 'new mode, created just now' : source === 'router' ? 'switched by what you said' : '',
+    why: source === 'spawner' ? (about || 'You kept coming back to this subject, so it gets a mode of its own.') : '',
+    deltas: [
+      delta('waits', lastProfile?.session.input.turn_detection.min_silence, td.min_silence, ' ms'),
+      delta('tools', lastProfile && tools(lastProfile), tools(profile)),
+      delta('expects', lastProfile?.session.input.keyterms.length, listen.keyterms.length, ' words'),
+    ],
+    // the full proof, one click away: everything the session.update carried
+    technical: `silence ${td.min_silence}–${td.max_silence} ms · barge-in delay ${td.interruption_delay} ms · ` +
+      `${listen.transcription_mode} · ${listen.keyterms.length} keyterms · v${profile.version} · ` +
+      `prompt ${profile.budget.total} tok (l0 ${profile.budget.l0} + l1 ${profile.budget.l1} + l2 ${profile.budget.l2})`,
+    hue: profile.hue,
+  })
+  if (source === 'spawner') {
+    $('instrument').classList.remove('birth')
+    void $('instrument').offsetWidth  // restart the wave if two modes are born close together
+    $('instrument').classList.add('birth')
+  }
+  lastProfile = profile
+}
+
+// One changed value: {label, was, now}. `was` is undefined on the first swap of a call and when nothing changed.
+function delta(label, was, now, unit = '') {
+  const changed = was !== undefined && was !== null && was !== now
+  return { label, was: changed ? `${was}` : undefined, now: `${now}${unit}` }
 }
 
 loadModes()
@@ -610,6 +632,7 @@ async function call() {
           $('btn').disabled = false
           $('btn').textContent = 'End call'
           $('btn').classList.add('live')
+          document.body.classList.add('in-call')  // compact, pinned instrument
           // The stored agent's own prompt got us this far. Now load the real
           // profile — this is the first swap of every call.
           if (selectedMode) applyMode(selectedMode)
@@ -751,6 +774,9 @@ function reset() {
   $('btn').disabled = false
   $('btn').textContent = 'Start call'
   $('btn').classList.remove('live')
+  document.body.classList.remove('in-call')
+  lastProfile = null
+  bornThisCall = new Set()
 }
 
 function fail(message) {
@@ -823,16 +849,41 @@ function dropAgentPartial() {
 // colour of the profile it recorded. Without it, switching to gym later would
 // repaint every earlier 'profile loaded — Deep work' line amber, quietly
 // rewriting the history the marker exists to preserve.
-function showSwitch(name, detail, hue) {
+function showSwitch({ name, how, why, deltas, technical, hue }) {
   clearEmpty()
+  const span = (className, text) => {
+    const node = document.createElement('span')
+    node.className = className
+    node.textContent = text
+    return node
+  }
   const line = document.createElement('div')
   line.className = 'switch'
   if (hue !== undefined) line.style.setProperty('--hue', hue)
-  line.textContent = `profile loaded — ${name}`
-  const small = document.createElement('span')
-  small.className = 'detail'
-  small.textContent = detail
-  line.append(small)
+  line.textContent = name
+  if (how) line.append(span('how', how))
+  if (why) line.append(span('why', why))
+
+  const row = document.createElement('div')
+  row.className = 'deltas'
+  for (const d of deltas) {
+    if (d.was === undefined && /^(0|none)\b/.test(d.now)) continue  // nothing before and nothing now: not news
+    const item = document.createElement('span')
+    item.append(`${d.label} `)
+    if (d.was !== undefined) item.append(span('was', d.was), span('to', '→'))
+    item.append(d.now)
+    row.append(item)
+  }
+  line.append(row)
+
+  const more = document.createElement('details')
+  const summary = document.createElement('summary')
+  summary.textContent = 'what was sent'
+  const body = document.createElement('p')
+  body.textContent = technical
+  more.append(summary, body)
+  line.append(more)
+
   $('transcript').append(line)
   scrollDown()
 }

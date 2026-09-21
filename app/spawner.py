@@ -120,12 +120,18 @@ def clean_fields(data: dict) -> dict:
     return {"name": name, "about": about, "keyterms": keyterms}
 
 
-def default_settings(mode_id: str, fields: dict) -> dict:
-    """A vanilla profile: neutral listening, web search, quick to evolve. Hue from the id so it is stable."""
+def far_hue(taken: list[int]) -> int:
+    """The hue furthest around the wheel from every mode that exists, so a newborn mode is visibly new."""
+    gap = lambda h: min(min(abs(h - t), 360 - abs(h - t)) for t in taken)
+    return max(range(0, 360, 5), key=gap)
+
+
+def default_settings(mode_id: str, fields: dict, taken: list[int] | None = None) -> dict:
+    """A vanilla profile: neutral listening, web search, quick to evolve. Hue far from `taken`, else from the id."""
     return {
         "name": fields["name"],
         "about": fields["about"],
-        "hue": int(hashlib.md5(mode_id.encode()).hexdigest(), 16) % 360,
+        "hue": far_hue(taken) if taken else int(hashlib.md5(mode_id.encode()).hexdigest(), 16) % 360,
         "tools": ["web_search"],  # a new subject usually needs a lookup before it needs a style
         "history_depth": 10,
         "model": None,
@@ -145,7 +151,8 @@ def spawn(conn, session_id: str, members: list[dict], fields: dict, model: str) 
     rationale = (f"Spawned mid-call from {len(texts)} utterances in session {session_id} that "
                  f"{model.rsplit('/', 1)[-1]} grouped as one subject. Vanilla template prompt.\n\n"
                  + "\n".join(f"- {t}" for t in texts))
-    store.add_mode(conn, mode_id, fields["name"], default_settings(mode_id, fields), prompt,
+    taken = [store.current(conn, m["id"])["settings"].get("hue", 190) for m in store.list_modes(conn)]
+    store.add_mode(conn, mode_id, fields["name"], default_settings(mode_id, fields, taken), prompt,
                    rationale, source="spawner", status="provisional")
     store.claim_candidates(conn, [m["id"] for m in members], mode_id)
     router.fingerprint_one(conn, mode_id, seed_vectors=[m["vector"] for m in members])  # sounds like what was said
