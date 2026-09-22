@@ -178,6 +178,7 @@ let lastAgentText = '' // what the agent last said; if 'you' say the same words,
 let pendingFinal = null // a final transcript that arrived while an ask was in flight; sent right after
 let recapSent = new Set() // modes whose memory was already injected this call; once is enough
 let lastProfile = null    // the profile before this swap, so the marker can say what changed
+let routeNote = ''        // how sure the router was, for the marker: '94% sure'
 let bornThisCall = new Set() // modes spawned in this call keep a 'new' tag until it ends
 let lastRoutedWords = 0  // how many words the last partial ask had; ask again only when it grew
 let modesById = {}
@@ -472,10 +473,13 @@ async function maybeRoute(text, final = false) {
     const res = await fetch('/route', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, live_mode: liveMode, session_id: sessionId, ts_ms: Date.now(), final }),
+      // agent_last: what was just asked, so a short answer can be read in context
+      body: JSON.stringify({ text, live_mode: liveMode, session_id: sessionId, ts_ms: Date.now(), final, agent_last: lastAgentText }),
     })
     const d = await res.json()
     if (res.ok && d.switch && !pinned && d.mode && d.mode !== liveMode) {
+      routeNote = d.jev && d.signal !== 'spawned' ? `${Math.round((d.jev.p[d.jev.mode] ?? 0) * 100)}% sure` : ''
+
       if (d.spawned) await loadModes(true)   // the new mode needs a button before it can be highlighted
       selectedMode = d.mode
       await applyMode(d.mode, d.spawned ? 'spawner' : 'router', d.recap, d.spawned?.about)
@@ -513,7 +517,7 @@ async function applyMode(id, source = 'manual', recap = undefined, about = '') {
   const tools = (p) => p.session.tools.map((tool) => tool.name.replace('_', ' ')).join(', ') || 'none'
   showSwitch({
     name: profile.name,
-    how: source === 'spawner' ? 'new mode, created just now' : source === 'router' ? 'switched by what you said' : '',
+    how: source === 'spawner' ? 'new mode, created just now' : source === 'router' ? 'switched by what you said' + (routeNote ? `, ${routeNote}` : '') : '',
     why: source === 'spawner' ? (about || 'You kept coming back to this subject, so it gets a mode of its own.') : '',
     deltas: [
       delta('waits', lastProfile?.session.input.turn_detection.min_silence, td.min_silence, ' ms'),

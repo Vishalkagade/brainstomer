@@ -125,8 +125,20 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row          # rows behave like dicts: row["prompt"]
     conn.execute("PRAGMA foreign_keys = ON")  # off by default in SQLite; on, a bad mode_id is an error
     conn.executescript(SCHEMA)
-    if "vector" not in {r["name"] for r in conn.execute("PRAGMA table_info(candidates)")}:
-        conn.execute("ALTER TABLE candidates ADD COLUMN vector TEXT")  # databases created before 13 Sep
+    # Columns added after the table existed. Two requests can open the store at the same moment and both see
+    # the column missing; the second ALTER then fails with "duplicate column", which is fine.
+    for table, column, kind, why in (
+        ("candidates", "vector", "TEXT", "databases created before 13 Sep"),
+        ("routes", "jev_json", "TEXT", "Jev's verdict, from 21 Sep"),
+        ("routes", "agent_last", "TEXT", "what the agent had just said, so an ask can be replayed"),
+        ("routes", "final", "INTEGER", "1 = a finished sentence, 0 = still talking"),
+    ):
+        if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            except sqlite3.OperationalError as err:
+                if "duplicate column" not in str(err):
+                    raise
     return conn
 
 
@@ -307,17 +319,23 @@ def log_switch(conn: sqlite3.Connection, session_id: str, ts_ms: int,
 
 
 def log_route(conn: sqlite3.Connection, session_id: str, ts_ms: int, text: str,
-              live_mode: str | None, decision: dict) -> int:
+              live_mode: str | None, decision: dict, agent_last: str = "", final: bool = True) -> int:
     """Keep every router decision with its scores. This is the evaluation set, built from use."""
     cursor = conn.execute(
-        "INSERT INTO routes (session_id, ts_ms, text, live_mode, mode, switch, signal, scores_json, terms, embed_ms) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO routes (session_id, ts_ms, text, live_mode, mode, switch, signal, scores_json, terms, embed_ms, jev_json, agent_last, final) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (session_id, ts_ms, text, live_mode, decision["mode"], int(bool(decision["switch"])),
          decision["signal"], json.dumps(decision.get("scores", {})), ",".join(decision.get("terms", [])),
-         decision.get("embed_ms")),
+         decision.get("embed_ms"), json.dumps(decision["jev"]) if decision.get("jev") else None, agent_last, int(final)),
     )
     conn.commit()
     return cursor.lastrowid
+
+
+def set_route_jev(conn: sqlite3.Connection, route_id: int, verdict: dict) -> None:
+    """Jev's verdict arriving after the row was written: shadow mode never waits for it."""
+    conn.execute("UPDATE routes SET jev_json = ? WHERE id = ?", (json.dumps(verdict), route_id))
+    conn.commit()
 
 
 def add_candidate(conn: sqlite3.Connection, mode_id: str, session_id: str | None, kind: str, text: str,

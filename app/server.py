@@ -17,6 +17,7 @@ import os
 import sqlite3
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +27,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import jev  # noqa: E402
 import memory  # noqa: E402
 import profiles  # noqa: E402
 import router  # noqa: E402
@@ -40,6 +42,8 @@ WEB = Path(__file__).resolve().parent / "web"
 TOKEN_TTL_SECONDS = 60
 
 READ_ONLY = os.environ.get("BRAINSTORMER_READ_ONLY") == "1"  # hosted demo: history visible, promote refused
+JEV_MODE = os.environ.get("JEV", "on")  # on: Jev decides, embeddings fall back | shadow: logged only | off: never asked
+JEV_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jev")
 
 
 def mint_token() -> dict:
@@ -65,6 +69,15 @@ def refresh_recaps() -> None:
             memory.refresh_all(conn, client)
     except Exception as err:  # memory is a nicety; a failure here must not touch the call
         print(f"recap refresh failed: {err}")
+
+
+def late_verdict(route_id: int, verdict: dict) -> None:
+    """Runs on the Jev thread once the shadow answer lands, after the page already got its decision."""
+    try:
+        with closing(store.connect()) as conn:
+            store.set_route_jev(conn, route_id, verdict)
+    except Exception as err:
+        print(f"jev verdict not logged: {err}")
 
 
 def evolution_overview(conn) -> dict:
@@ -262,11 +275,31 @@ class Handler(BaseHTTPRequestHandler):
         live_mode = body.get("live_mode") or None
         try:
             with closing(store.connect()) as conn:
-                decision = router.decide(text, live_mode, router.load_fingerprints(conn),
-                                         router.keyterm_index(conn), embed_fn=router.embed,  # passed at call time so tests can fake it
-                                         final=bool(body.get("final")))
+                # Jev is asked in its own thread, so an ask costs max(jev, embedding), never the sum.
+                #   on:     Jev decides. The embedding runs only on a finished sentence, for the vector that
+                #           memory recall and the candidates table need; if Jev fails, embeddings decide.
+                #   shadow: the embedding decides, Jev's verdict is logged next to it.
+                final = bool(body.get("final"))
+                agent_last = body.get("agent_last") or ""
+                future = None
+                if JEV_MODE != "off" and len(router.strip_fillers(text).split()) >= router.MIN_WORDS:
+                    future = JEV_POOL.submit(jev.route, text, live_mode, agent_last, jev.mode_options(conn))
+                embed_decide = lambda: router.decide(text, live_mode, router.load_fingerprints(conn),
+                                                     router.keyterm_index(conn), embed_fn=router.embed, final=final)
+                decision = embed_decide() if (JEV_MODE != "on" or final or future is None) else None
+                if JEV_MODE == "on" and future is not None:
+                    verdict = future.result(timeout=jev.TIMEOUT_S + 0.5)
+                    ruled = router.decide_jev(text, live_mode, verdict, final, agent_last)
+                    if ruled is None:  # Jev had no answer: embeddings decide, as before 22 Sep
+                        decision = decision or embed_decide()
+                        decision["jev"] = verdict
+                    else:
+                        vector = decision.pop("_vector", None) if decision else None
+                        decision = ruled | ({"_vector": vector} if vector is not None else {})
+                elif future is not None and future.done():  # shadow: never wait; a late verdict is logged below
+                    decision["jev"] = future.result()
                 vector = decision.pop("_vector", None)  # 4096 floats: for the store, not for the page
-                if decision["signal"] == "unknown" and body.get("final"):  # once per utterance, not per partial
+                if decision["signal"] == "unknown" and final:  # once per utterance, not per partial
                     cid = store.add_candidate(conn, router.GENERAL, body["session_id"], "unknown_topic", text, vector)
                     new_mode = spawner.maybe_spawn(conn, body["session_id"], cid, group_fn=spawner.group_and_name)
                     if new_mode:
@@ -277,7 +310,9 @@ class Handler(BaseHTTPRequestHandler):
                     # memory that matches these words, not just the latest: the vector is already paid for
                     decision["recap"] = memory.relevant(conn, decision["mode"], vector, exclude_session=body["session_id"])
                 if decision["signal"] not in ("too_short", "no_fingerprints"):
-                    store.log_route(conn, body["session_id"], int(body.get("ts_ms") or 0), text, live_mode, decision)
+                    route_id = store.log_route(conn, body["session_id"], int(body.get("ts_ms") or 0), text, live_mode, decision, agent_last, final)
+                    if future is not None and "jev" not in decision:
+                        future.add_done_callback(lambda f, rid=route_id: late_verdict(rid, f.result()))
         except (Exception, SystemExit) as err:  # a routing failure must never take the call down; the page just stays put
             print(f"route failed: {err}")
             self._send(500, json.dumps({"error": str(err), "switch": False}).encode(), "application/json")
@@ -308,6 +343,8 @@ def main() -> None:
                 raise
             port += 1
 
+    if JEV_MODE != "off":
+        JEV_POOL.submit(jev.warm)  # open the connection now, not on the first route ask of the first call
     print(f"agent  {AGENT_ID}")
     print(f"talk   http://localhost:{port}")
     try:

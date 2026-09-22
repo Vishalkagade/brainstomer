@@ -82,14 +82,16 @@ def group_and_name(texts: list[str]) -> tuple[dict, str]:
     numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts, 1))
     ask = [
         {"role": "system", "content":
-            "You organise what a person says to a personal voice assistant into subjects. You get numbered sentences "
-            "from one conversation. Decide which sentences are about the SAME broad subject as the LAST sentence "
-            "(for example: buying clothes, buying shoes and buying jackets are one subject, shopping; asking for "
-            "finance advice is not). Return ONLY a JSON object: "
-            '{"same": [<1-based numbers of every sentence on that subject, including the last one>], '
-            '"name": <2-3 word title for that subject, e.g. "Shopping">, '
-            '"about": <one sentence naming the subject matter, concrete and topical, no advice>, '
-            '"keyterms": [<up to 10 domain-specific nouns or names a transcriber might mishear; never everyday words>]}'},
+            "You organise what a person says to a personal voice assistant into areas of their life. You get numbered "
+            "sentences from one conversation. Decide which sentences belong to the SAME area as the LAST sentence "
+            "(buying clothes, shoes and jackets are one area, Shopping; asking for finance advice is not). "
+            "Name the area at UMBRELLA level, the way a person names a hobby or a part of life, never the first detail "
+            "they asked about: a question on the badminton serve is the area Badminton; how to cook dal is Cooking; "
+            "which Seiko to buy is Shopping; places to visit in Asia is Travel. One or two words. Return ONLY a JSON object: "
+            '{"same": [<1-based numbers of every sentence in that area, including the last one>], '
+            '"name": <the umbrella area, 1-2 words, e.g. "Badminton">, '
+            '"about": <one sentence: the area as a whole, then what he asked about so far as examples, no advice>, '
+            '"keyterms": [<up to 10 domain-specific nouns or names from the whole area a transcriber might mishear; never everyday words>]}'},
         {"role": "user", "content": numbered},
     ]
     failures = []

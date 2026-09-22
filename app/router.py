@@ -184,14 +184,81 @@ def decide(text: str, live_mode: str | None, fingerprints: dict, index: dict,
             "_vector": vec}  # for the candidates table; the server strips it before answering the page
 
 
+# The Jev rule (decided 22 Sep after 23 logged asks agreed 91% with the embedding, both disagreements Jev's way).
+SWITCH_P = 0.8   # Jev's probability for a mode before we move; TypeSafe's own "act automatically" band starts at 0.9 for high stakes
+REPLY_P = 0.6    # above this, the words answer the agent's last question: stay whatever they look like
+
+
+def decide_jev(text: str, live_mode: str | None, verdict: dict, final: bool, agent_last: str) -> dict | None:
+    """The router's decision from Jev's verdict. None when Jev had no answer, so the caller falls back to embeddings.
+
+    signal: 'reply' (answering the agent, stay) | 'jev' (a mode won or nothing changed) | 'unknown' (none fits: general).
+    """
+    if not verdict or "error" in verdict:
+        return None
+    words = strip_fillers(text).split()
+    if len(words) < MIN_WORDS:
+        return {"mode": live_mode, "switch": False, "signal": "too_short", "scores": {}, "terms": [], "jev": verdict}
+    base = {"scores": verdict["p"], "terms": [], "jev": verdict, "confidence": verdict["confidence"]}
+    target = GENERAL if verdict["mode"] == "none" else verdict["mode"]
+    p = verdict["p"].get(verdict["mode"], 0.0)
+    if target != GENERAL and target != live_mode and p >= SWITCH_P:  # a confident subject wins, even mid-sentence
+        return {"mode": target, "switch": True, "signal": "jev", **base}
+    # The reply score only ever keeps you where you are. It must not block a subject: "I wanted to learn about
+    # attention" right after "what's on your mind?" scores 0.94 as a reply and is still a new subject.
+    if agent_last and verdict["reply"] >= REPLY_P:  # no agent_last on the first ask of a call: the score means nothing then
+        return {"mode": live_mode, "switch": False, "signal": "reply", **base}
+    if target == GENERAL and target != live_mode and p >= SWITCH_P and final:  # nothing fits: general, on a finished sentence only
+        return {"mode": GENERAL, "switch": True, "signal": "unknown", **base}
+    return {"mode": live_mode, "switch": False, "signal": "unknown" if target == GENERAL else "jev", **base}
+
+
+def compare(conn, fresh: bool = False) -> None:
+    """Embedding router versus the Jev rule on every logged ask. --fresh re-asks Jev with today's modes and the logged context."""
+    rows = [dict(r) for r in conn.execute("SELECT text, live_mode, mode, switch, signal, embed_ms, jev_json, agent_last, final FROM routes "
+                                          "WHERE jev_json IS NOT NULL ORDER BY ts_ms")]
+    if not rows:
+        print("No asks with a Jev verdict yet. Make a call with the server running.")
+        return
+    if fresh:
+        import jev
+        options = jev.mode_options(conn)
+        for r in rows:
+            r["jev_json"] = json.dumps(jev.route(r["text"], r["live_mode"], r["agent_last"] or "", options))
+    agree = errors = 0
+    jev_ms, embed_ms = [], []
+    print(f"{'emb':<15} {'jev rule':<15} {'conf':>5} {'reply':>5} {'push':>5} {'ms e/j':>9}  text")
+    for r in rows:
+        j = json.loads(r["jev_json"])
+        if "error" in j:
+            errors += 1
+            print(f"{r['mode'] or '-':<15} {'ERROR':<15} {'':>5} {'':>5} {'':>5} {'':>9}  {j['error'][:60]}")
+            continue
+        rule = decide_jev(r["text"], r["live_mode"], j, final=r["final"] is None or bool(r["final"]), agent_last=r["agent_last"] or "")
+        jev_mode = rule["mode"]
+        same = jev_mode == r["mode"]
+        agree += same
+        jev_ms.append(j["ms"]); embed_ms.append(r["embed_ms"] or 0)
+        print(f"{r['mode'] or '-':<15} {(jev_mode or '-') + ('' if same else ' *'):<15} {j['confidence']:>5.2f} {j['reply']:>5.2f} "
+              f"{j['pushback']:>5.2f} {(r['embed_ms'] or 0):>4}/{j['ms']:<4}  {r['text'][:60]}")
+    n = len(rows) - errors
+    if n:
+        med = lambda xs: sorted(xs)[len(xs) // 2]
+        print(f"\n{n} asks: agree on {agree} ({100 * agree // n}%), * marks a disagreement. "
+              f"median ms embedding {med(embed_ms)}, jev {med(jev_ms)}. {errors} Jev errors.")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
-        raise SystemExit('Usage: app/router.py build   |   app/router.py "some words" [live_mode]')
+        raise SystemExit('Usage: app/router.py build | compare [--fresh] | "some words" [live_mode]')
     config.load_env()
     with closing(store.connect()) as conn:
         if sys.argv[1] == "build":
             for mode in build(conn):
                 print(f"{mode:<12} fingerprint stored")
+            return
+        if sys.argv[1] == "compare":
+            compare(conn, fresh="--fresh" in sys.argv)
             return
         text = sys.argv[1]
         live_mode = sys.argv[2] if len(sys.argv) > 2 else None
