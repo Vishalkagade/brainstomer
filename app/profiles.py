@@ -21,6 +21,12 @@ import tools
 
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 
+
+def core_file() -> Path:
+    """Your l1_user_core.md when present (untracked), else the blank template that ships in the repo."""
+    real = PROMPTS / "l1_user_core.md"
+    return real if real.exists() else PROMPTS / "l1_user_core.example.md"
+
 # Hard caps, in tokens. These are the design, not a limitation: to add something
 # the evolver has to evict something and say which. A layer over its cap is an
 # error, not a warning — otherwise the caps mean nothing by step 4.
@@ -90,7 +96,7 @@ def assemble(mode: str) -> dict:
     with closing(store.connect()) as conn:  # closing() actually closes; bare `with conn:` only ends a transaction
         live = store.current(conn, mode)
         user_core = (store.current(conn, store.CORE)["prompt"] if store.is_layer(conn, store.CORE)
-                     else read_layer(PROMPTS / "l1_user_core.md"))  # a store from before 26 Sep: the file, until seeded
+                     else read_layer(core_file()))  # a store from before 26 Sep: the file, until seeded
     settings, overlay = live["settings"], live["prompt"]
 
     budget = {

@@ -16,13 +16,15 @@ That makes rollback easy: only one value needs to be updated.
 
 import difflib
 import json
+import os
 import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_FILE = Path(__file__).resolve().parent / "data" / "brainstormer.db"
+DB_FILE = Path(os.environ.get("BRAINSTORMER_DB")  # hosted: a path on the persistent disk
+               or Path(__file__).resolve().parent / "data" / "brainstormer.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS modes (
@@ -491,9 +493,8 @@ def seed(conn: sqlite3.Connection, modes_dir: Path) -> None:
     """Load each mode file as v1, and the user core. Skips what already exists, so it is safe to rerun."""
     import profiles  # here, not at the top: profiles will import store, and a top-level import would loop
 
-    core = modes_dir.parent / "l1_user_core.md"
-    if core.exists():
-        print(f"{CORE:<12} {'seeded as v1 from' if seed_core(conn, core) else 'already in the store, skipped'} {core.name}")
+    core = profiles.core_file()
+    print(f"{CORE:<12} {'seeded as v1 from' if seed_core(conn, core) else 'already in the store, skipped'} {core.name}")
     for path in sorted(modes_dir.glob("*.md")):
         mode_id = path.stem
         if conn.execute("SELECT 1 FROM modes WHERE id = ?", (mode_id,)).fetchone():

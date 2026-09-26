@@ -340,8 +340,11 @@ def main() -> None:
             port += 1
 
     with closing(store.connect()) as conn:
-        if store.seed_core(conn, Path(__file__).resolve().parent / "prompts" / "l1_user_core.md"):
-            print("user core seeded into the store as v1 from l1_user_core.md")
+        if not store.list_modes(conn):  # empty store (fresh disk): every mode file becomes v1
+            store.seed(conn, profiles.PROMPTS / "modes")
+        core = profiles.core_file()
+        if store.seed_core(conn, core):
+            print(f"user core seeded into the store as v1 from {core.name}")
     if JEV_MODE != "off":
         JEV_POOL.submit(jev.warm)  # open the connection now, not on the first route ask of the first call
     print(f"agent  {AGENT_ID}")
