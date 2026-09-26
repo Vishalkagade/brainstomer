@@ -1,0 +1,7 @@
+httpx
+typesafe-sdk
+
+# tests and page smoke checks
+pytest
+playwright
+websockets

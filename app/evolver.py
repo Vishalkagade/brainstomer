@@ -45,6 +45,8 @@ FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 DEFAULT_EVOLVE_AFTER = {"sessions": 3, "turns": 12}  # used when a mode's settings do not say; a guess
 _proposing: set[str] = set()   # modes with a proposal in flight in this process; two page loads must not pay twice
 _proposing_lock = threading.Lock()
+_failed_at: dict[str, float] = {}  # mode -> when its last unattended proposal failed; no retry for RETRY_AFTER_S
+RETRY_AFTER_S = 3600
 
 # What the evolver may set, and within what bounds. Anything else in its output is an error.
 TRANSCRIPTION_MODES = ("balanced", "min_latency", "max_accuracy")
@@ -81,11 +83,20 @@ def attribute(turns: list[dict], switches: list) -> list[tuple[dict, dict | None
     return out
 
 
+def is_echo(user_text: str, agent_before: str) -> bool:
+    """The mic heard the agent's own voice: the 'user' line is the start of what the agent had just said.
+    Seen 22 Sep: 'You would start by selecting' twice, then him asking whether the speakers were on."""
+    words = (user_text or "").lower().split()
+    return len(words) >= 3 and " ".join(words) in " ".join((agent_before or "").lower().split())
+
+
 def usable(turn: dict) -> bool:
     """A turn the evolver may learn from: a real exchange, heard clearly."""
     if turn.get("trigger") == "greeting":
         return False
     if not turn.get("user_transcript") or not turn.get("agent_text"):
+        return False
+    if is_echo(turn.get("user_transcript"), turn.get("agent_before", "")):
         return False
     confidence = turn.get("user_confidence")
     return confidence is None or confidence >= MIN_CONFIDENCE
@@ -305,9 +316,14 @@ def call_model(messages: list[dict]) -> tuple[str, str]:
             failures.append(f"{model.rsplit('/', 1)[-1]}: {response.status_code}")
             continue
         response.raise_for_status()  # anything else (401, 400) is our mistake, stop and show it
+        choice = response.json()["choices"][0]
+        text = choice["message"].get("content") or ""
+        if not text.strip():  # a reasoning model that spent the whole budget thinking: content empty, finish_reason length
+            failures.append(f"{model.rsplit('/', 1)[-1]}: empty content, finish {choice.get('finish_reason')}")
+            continue
         if failures:
             print(f"note: fell back to {model.rsplit('/', 1)[-1]} after {', '.join(failures)}")
-        return response.json()["choices"][0]["message"]["content"] or "", model
+        return text, model
     raise SystemExit("No model in MODELS answered: " + ", ".join(failures))
 
 
@@ -383,6 +399,9 @@ def auto_propose(conn, mode_id: str, convos: list[dict]) -> int | None:
     ok, why = due(conn, live)
     if not ok:
         return None
+    import time
+    if time.time() - _failed_at.get(mode_id, 0) < RETRY_AFTER_S:
+        return None  # a failed proposal is not retried on every page load; an hour, then again
     with _proposing_lock:
         if mode_id in _proposing:
             return None
@@ -394,7 +413,8 @@ def auto_propose(conn, mode_id: str, convos: list[dict]) -> int | None:
         conn.commit()
         print(f"evolver: {mode_id} v{live['n']} -> new version {version_id} live ({why})")
         return version_id
-    except SystemExit as err:  # not enough conversations, an invalid answer, no model: say so, try again next refresh
+    except (SystemExit, ValueError) as err:  # not enough conversations, no model, or an answer that is not a proposal
+        _failed_at[mode_id] = time.time()
         print(f"evolver: {mode_id} not evolved: {err}")
         return None
     finally:

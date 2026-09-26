@@ -49,8 +49,16 @@ async function load() {
 // What a version is, in one word. `calls` is how many calls ran on it.
 function standing(v) {
   if (v.live) return 'live'
+  if (v.verdict === 'rolled_back') return 'rolledback'
   if (v.calls === 0 && v.source === 'evolver') return 'proposed'
   return v.calls ? 'earlier' : 'unused'
+}
+
+// The evidence's word on an evolver version: being judged, kept, or rolled back. '' for hand-made versions.
+function verdictLine(v) {
+  if (v.verdict_why) return v.verdict_why
+  if (v.live && v.source === 'evolver' && v.parent_id) return 'went live by itself; the next calls decide if it stays'
+  return ''
 }
 
 function pickMode(id, preferredVersion) {
@@ -83,9 +91,11 @@ function drawTimeline() {
     const state = standing(v)
     const node = el('li', `node ${state}` + (v.id === versionId ? ' on' : ''))
     const line = el('div')
-    line.append(el('span', 'n', `v${v.n}`), el('span', 'tag', ['live', 'proposed'].includes(state) ? state : ''))
+    const tag = { live: 'live', proposed: 'proposed', rolledback: 'rolled back' }[state] || ''
+    line.append(el('span', 'n', `v${v.n}`), el('span', 'tag', tag))
     const calls = v.calls ? ` · ran in ${v.calls} call${v.calls > 1 ? 's' : ''}` : ''
     node.append(line, el('div', 'when', `${day(v.created_at)} · ${v.source}${calls}`))
+    if (verdictLine(v)) node.append(el('div', 'when verdict', verdictLine(v)))
     node.onclick = () => pickVersion(v.id)
     if (!v.live && canPromote) node.append(promoteButton(v, state))
     return node

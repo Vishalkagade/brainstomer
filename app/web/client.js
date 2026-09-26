@@ -1,7 +1,7 @@
 // Mic -> AssemblyAI -> speaker, in the browser.
 //
 // The two AudioWorklet processors below are taken from AssemblyAI's starter
-// client (voice-agent-starter/deployment/browser/app.js) with comments added.
+// client (AssemblyAI voice-agent-starter-python, deployment/browser/app.js) with comments added.
 // They are commodity audio plumbing — resampling and buffering — and writing
 // them again from scratch would land on the same code. Everything after them,
 // the session layer, is ours, because that is the part Brainstormer changes.
@@ -176,7 +176,6 @@ let lastRouteAt = 0
 let routedText = ''    // last text we asked about; do not ask twice for the same words
 let lastAgentText = '' // what the agent last said; if 'you' say the same words, that is the speaker leaking into the mic
 let pendingFinal = null // a final transcript that arrived while an ask was in flight; sent right after
-let recapSent = new Set() // modes whose memory was already injected this call; once is enough
 let lastProfile = null    // the profile before this swap, so the marker can say what changed
 let routeNote = ''        // how sure the router was, for the marker: '94% sure'
 let bornThisCall = new Set() // modes spawned in this call keep a 'new' tag until it ends
@@ -496,18 +495,15 @@ async function applyMode(id, source = 'manual', recap = undefined, about = '') {
   const profile = await (await fetch(`/profile?mode=${encodeURIComponent(id)}`)).json()
   if (profile.error) return fail(profile.error)
 
+  // what this mode remembers rides inside the prompt: a conversation.message never reached the model (measured 26 Sep).
+  // On a router switch the server built it from the words just said; on a button click it is the cached recent one.
+  const memoryText = recap !== undefined ? recap : profile.recap
+  if (memoryText) profile.session.system_prompt += '\n\n=== MEMORY: from earlier calls ===\n\n' + memoryText
   // The entire swap: one session.update, on the socket that is already open.
   // No reconnect, no new session, nothing said so far is lost.
   send({ type: 'session.update', session: profile.session })
   liveMode = id
   logSwitch(id, profile.version_id, source)
-  // what this mode remembers: on a router switch, the past exchanges closest to what you just said;
-  // on a button click there are no words to match, so the most recent ones. One message, once per mode per call.
-  const memoryText = recap !== undefined ? recap : profile.recap
-  if (memoryText && !recapSent.has(id)) {
-    send({ type: 'conversation.message', role: 'system', content: memoryText })
-    recapSent.add(id)
-  }
   highlight(id)
 
   const listen = profile.session.input
@@ -772,7 +768,6 @@ function reset() {
   routedText = ''
   lastAgentText = ''
   pendingFinal = null
-  recapSent = new Set()
   lastRoutedWords = 0
   highlight(selectedMode)
   $('btn').disabled = false

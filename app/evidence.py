@@ -117,6 +117,46 @@ def review(conn, mode_id: str) -> dict | None:
     return {"version_id": v["id"], "verdict": verdict, "why": why}
 
 
+def iso_to_ms(iso: str) -> int:
+    from datetime import datetime, timezone
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def review_core(conn) -> dict | None:
+    """Judge the live user core if the evolver wrote it, on every mode's turns since it went live,
+    against the same number of turns just before. Keep or roll back, once."""
+    live = store.current(conn, store.CORE)
+    v = conn.execute("SELECT id, n, source, parent_id, verdict, created_at FROM versions WHERE id = ?",
+                     (live["version_id"],)).fetchone()
+    if v["source"] != "evolver" or v["verdict"] or not v["parent_id"]:
+        return None
+    since = iso_to_ms(v["created_at"])
+    rows = store.evidence_all(conn)
+    mine = [r for r in rows if r["ts_ms"] >= since]
+    sessions = len({r["session_id"] for r in mine})
+    if len(mine) < JUDGE_AFTER["turns"] or sessions < JUDGE_AFTER["sessions"]:
+        return None
+    theirs = [r for r in rows if r["ts_ms"] < since][-len(mine):]
+    parent_n = conn.execute("SELECT n FROM versions WHERE id = ?", (v["parent_id"],)).fetchone()["n"]
+    a = score(mine)
+    if not theirs:
+        verdict, why = "kept", f"kept after {len(mine)} turns in {sessions} calls across modes: {a:.0%} went wrong, nothing before it to compare"
+    else:
+        b = score(theirs)
+        numbers = f"{a:.0%} of {len(mine)} turns went wrong across modes, against {b:.0%} of the {len(theirs)} before"
+        if a > b:
+            router.promote(conn, v["parent_id"])
+            verdict, why = "rolled_back", f"rolled back to v{parent_n} after {sessions} calls: {numbers}"
+        else:
+            verdict, why = "kept", f"kept after {sessions} calls: {numbers}"
+    store.set_verdict(conn, v["id"], verdict, why)
+    print(f"evidence review user core v{v['n']}: {why}")
+    return {"version_id": v["id"], "verdict": verdict, "why": why}
+
+
 def headline(rows: list[dict]) -> str:
     """One line for a rationale or the evolution page: '4 of 12 turns cut off, 2 pushed back'."""
     s = summary(rows)

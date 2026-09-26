@@ -151,6 +151,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
         ("versions", "parent_id", "INTEGER", "the version that was live when the evolver proposed this one"),
         ("versions", "verdict", "TEXT", "kept | rolled_back, set once the version has been judged on evidence"),
         ("versions", "verdict_why", "TEXT", "the numbers behind the verdict, in words"),
+        ("versions", "verdict_at", "TEXT", "when the verdict was given; the core evolver runs on kept verdicts newer than its last proposal"),
     ):
         if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
             try:
@@ -177,7 +178,7 @@ def add_version(conn: sqlite3.Connection, mode_id: str, settings: dict,
 
 def set_verdict(conn: sqlite3.Connection, version_id: int, verdict: str, why: str) -> None:
     """Once per version: the evidence has spoken. kept or rolled_back."""
-    conn.execute("UPDATE versions SET verdict = ?, verdict_why = ? WHERE id = ?", (verdict, why, version_id))
+    conn.execute("UPDATE versions SET verdict = ?, verdict_why = ?, verdict_at = ? WHERE id = ?", (verdict, why, now(), version_id))
     conn.commit()
 
 
@@ -443,6 +444,13 @@ def evidence_by_version(conn: sqlite3.Connection, mode_id: str) -> dict[int, lis
         if r["version_id"] is not None:
             out.setdefault(r["version_id"], []).append(dict(r))
     return out
+
+
+def evidence_all(conn: sqlite3.Connection) -> list[dict]:
+    """Every judged turn of every mode, in time order: the core is judged on all of them."""
+    rows = conn.execute("SELECT mode_id, session_id, ts_ms, problem, pushback, user_text, judged_at FROM evidence "
+                        "ORDER BY ts_ms").fetchall()
+    return [dict(r) for r in rows]
 
 
 def judged_turns(conn: sqlite3.Connection, mode_id: str) -> set[tuple[str, int]]:

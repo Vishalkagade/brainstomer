@@ -15,3 +15,9 @@ prototypes
 app/data/
 
 
+
+# Personal. The template l1_user_core.example.md ships instead; the store keeps your real one.
+app/prompts/l1_user_core.md
+__pycache__/
+*.pyc
+.impeccable/

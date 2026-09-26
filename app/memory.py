@@ -4,13 +4,14 @@
     .venv/bin/python app/memory.py gym         print one mode's recap
 
 A call starts empty on AssemblyAI's side. So when the page switches into a mode it
-injects one system message: the last few exchanges that happened in that mode
-before, as a plain transcript. That is what `history_depth` in a mode's settings
-now means: how many exchanges come back. Capped in tokens, sent once per mode per
-call, never for General (its history is everything and nothing).
+appends a MEMORY block to that mode's system prompt: the last exchanges from the last
+three calls in that mode, and on a router switch also the past exchanges closest to
+what was just said. Capped in tokens. General gets an index of the areas talked about.
 
-Recaps are built off the reply path: at page load and by this command, never
-while a swap is waiting. `/profile` only reads what is cached.
+Why the prompt and not a conversation.message: measured 26 Sep, a conversation.message
+(system or user) never reached the model in three forced replies; the same text inside
+the system prompt did. Recaps are built off the reply path: at page load and by this
+command. `/profile` only reads what is cached; `/route` builds one from the store.
 """
 
 import sys
@@ -32,34 +33,67 @@ MAX_TOKENS = 500      # hard ceiling per recap, whatever history_depth says; est
 RELEVANT_K = 3        # on a router switch: the closest past exchanges to what was just said, not the last N
 RELEVANT_MIN = 0.45   # measured 15 Sep: true matches 0.55-0.66, same mode other exercise ~0.49, unrelated <= 0.37
 MAX_AGE_DAYS = 14     # "not too old": nothing older than this comes back
-MAX_SESSIONS = 5      # and never more than this many past calls
+MAX_SESSIONS = 3      # "at least the last three conversations" (Vishal, 26 Sep)
 NO_RECAP = {"general"}
 
 
-def recent_turns(conn, client: httpx.Client, mode_id: str, depth: int, convos: list[dict] | None = None) -> list[dict]:
-    """The last `depth` usable exchanges in this mode, oldest first, from recent calls only."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)).isoformat()
-    if convos is None:
-        convos = evolver.conversations(conn, client, mode_id)
-    convos = [c for c in convos if c["created_at"] >= cutoff][-MAX_SESSIONS:]
-    turns = [t for c in convos for t in c["turns"]]
-    return turns[-depth:]
-
-
-def render(turns: list[dict], mode_name: str) -> str:
-    """The injected message. Newest last, trimmed from the front to stay under MAX_TOKENS."""
-    if not turns:
+def render(turns: list[dict], mode_name: str, tail: str = "") -> str:
+    """The memory block. Newest last, trimmed from the front to stay under MAX_TOKENS. `tail` is kept whole."""
+    if not turns and not tail:
         return ""
     lines = []
     for t in turns:
         lines.append(f"He: {t['user_transcript'].strip()}")
         lines.append(f"You: {t['agent_text'].strip()}")
-    head = f"Earlier conversations in {mode_name} mode, most recent last. Use them as context; do not recite them.\n"
+    head = (f"Earlier conversations in {mode_name} mode, most recent last. Use them as context. "
+            f"If he asks what was said before, tell him from these; otherwise do not recite them.\n")
     body = "\n".join(lines)
-    while profiles.estimate_tokens(head + body) > MAX_TOKENS and len(lines) > 2:
+    while profiles.estimate_tokens(head + body + tail) > MAX_TOKENS and len(lines) > 2:
         lines = lines[2:]  # drop the oldest exchange
         body = "\n".join(lines)
-    return head + body
+    return head + body + tail
+
+
+def recent(conn, mode_id: str, depth: int, exclude_session: str | None = None) -> list[dict]:
+    """The last `depth` exchanges from the last MAX_SESSIONS calls in this mode, oldest first. Store only, no fetch."""
+    rows = [e for e in store.exchanges_for(conn, mode_id) if e["session_id"] != exclude_session]
+    order = []
+    for e in rows:
+        if e["session_id"] not in order:
+            order.append(e["session_id"])
+    keep = set(order[-MAX_SESSIONS:])
+    return [e for e in rows if e["session_id"] in keep][-depth:]
+
+
+def index(conn) -> str:
+    """For General: which areas earlier calls covered, so 'what do you know about me' has an answer."""
+    parts = []
+    for r in conn.execute("SELECT mode_id, COUNT(DISTINCT session_id) AS calls, MAX(ts_ms) AS last "
+                          "FROM exchanges GROUP BY mode_id ORDER BY last DESC"):
+        if r["mode_id"] in NO_RECAP or not any(m["id"] == r["mode_id"] for m in store.list_modes(conn)):
+            continue
+        when = datetime.fromtimestamp(r["last"] / 1000, timezone.utc).strftime("%-d %B") if r["last"] else "earlier"
+        parts.append(f"{store.current(conn, r['mode_id'])['name']} ({r['calls']} call{'s' if r['calls'] != 1 else ''}, last on {when})")
+    if not parts:
+        return ""
+    return ("Areas he has talked about with you in earlier calls: " + "; ".join(parts) + ". If he asks what you know "
+            "or what was said before, name these areas; the details arrive when the call moves into one of them.")
+
+
+def recall(conn, mode_id: str, vector: list[float] | None = None, exclude_session: str | None = None) -> str:
+    """The MEMORY block for a switch into `mode_id`: recent exchanges, plus the closest ones when there are words."""
+    if mode_id in NO_RECAP:
+        return index(conn)
+    live = store.current(conn, mode_id)
+    rows = recent(conn, mode_id, int(live["settings"].get("history_depth") or 10), exclude_session)
+    tail = ""
+    if vector is not None:
+        seen = {(e["session_id"], e["ts_ms"]) for e in rows}
+        close = [e for e in closest(conn, mode_id, vector, exclude_session) if (e["session_id"], e["ts_ms"]) not in seen]
+        if close:
+            tail = "\nAlso, from earlier calls, related to what he just said:\n" + "\n".join(
+                f"He: {e['user_text'].strip()}\nYou: {e['agent_text'].strip()}" for e in close)
+    return render([{"user_transcript": e["user_text"], "agent_text": e["agent_text"]} for e in rows], live["name"], tail)
 
 
 def index_exchanges(conn, client: httpx.Client, mode_id: str, convos: list[dict] | None = None) -> int:
@@ -80,11 +114,11 @@ def index_exchanges(conn, client: httpx.Client, mode_id: str, convos: list[dict]
     return store.add_exchanges(conn, mode_id, rows)
 
 
-def relevant(conn, mode_id: str, vector: list[float], exclude_session: str | None = None,
-             k: int = RELEVANT_K) -> str:
-    """The k past exchanges in this mode closest to what was just said. '' when nothing is close enough."""
+def closest(conn, mode_id: str, vector: list[float], exclude_session: str | None = None,
+            k: int = RELEVANT_K) -> list[dict]:
+    """The k past exchanges in this mode closest to what was just said, oldest first. [] when nothing is close enough."""
     if mode_id in NO_RECAP:
-        return ""
+        return []
     fps = router.load_fingerprints(conn)
     filler, own = fps.get(router.FILLER), fps.get(mode_id)
 
@@ -100,18 +134,21 @@ def relevant(conn, mode_id: str, vector: list[float], exclude_session: str | Non
     scored = [(router.cosine(vector, e["vector"]), e) for e in store.exchanges_for(conn, mode_id) if is_memory(e)]
     scored = [(s, e) for s, e in scored if s >= RELEVANT_MIN]
     scored.sort(key=lambda p: p[0], reverse=True)
-    top = sorted((e for _, e in scored[:k]), key=lambda e: e["ts_ms"])  # oldest first, like a transcript
+    return sorted((e for _, e in scored[:k]), key=lambda e: e["ts_ms"])  # oldest first, like a transcript
+
+
+def relevant(conn, mode_id: str, vector: list[float], exclude_session: str | None = None, k: int = RELEVANT_K) -> str:
+    """Only the closest exchanges, rendered. '' when nothing is close enough."""
+    top = closest(conn, mode_id, vector, exclude_session, k)
     if not top:
         return ""
-    name = store.current(conn, mode_id)["name"]
     turns = [{"user_transcript": e["user_text"], "agent_text": e["agent_text"]} for e in top]
-    return render(turns, name).replace("most recent last", "the ones related to what he just said")
+    return render(turns, store.current(conn, mode_id)["name"]).replace("most recent last", "the ones related to what he just said")
 
 
 def refresh(conn, client: httpx.Client, mode_id: str) -> str:
-    live = store.current(conn, mode_id)
     if mode_id in NO_RECAP:
-        text = ""
+        text = index(conn)
     else:
         convos = evolver.conversations(conn, client, mode_id)  # one fetch, three readers
         try:
@@ -121,11 +158,13 @@ def refresh(conn, client: httpx.Client, mode_id: str) -> str:
         try:
             evidence.judge_new(conn, mode_id, convos)  # what went wrong per turn, for the evolver; judged once
             evidence.review(conn, mode_id)  # keeps or rolls back an evolver version once enough turns ran on it
-            evolver.auto_propose(conn, mode_id, convos)  # and proposes the next one when the floors are met
         except Exception as err:  # never lets a judging problem take the recap down
             print(f"evidence for {mode_id} skipped: {err}")
-        depth = int(live["settings"].get("history_depth") or 10)
-        text = render(recent_turns(conn, client, mode_id, depth, convos), live["name"])
+        try:
+            evolver.auto_propose(conn, mode_id, convos)  # proposes the next version when the floors are met
+        except Exception as err:
+            print(f"evolver for {mode_id} skipped: {err}")
+        text = recall(conn, mode_id)  # from the exchange index just updated: the last calls, no words to match yet
     conn.execute("INSERT OR REPLACE INTO recaps (mode_id, text, updated_at) VALUES (?, ?, ?)",
                  (mode_id, text, store.now()))
     conn.commit()
@@ -133,10 +172,17 @@ def refresh(conn, client: httpx.Client, mode_id: str) -> str:
 
 
 def refresh_all(conn, client: httpx.Client) -> dict[str, int]:
-    """Every mode's recap. Returns mode -> token estimate."""
+    """Every mode's recap, then the user core's turn. Returns mode -> token estimate."""
     out = {}
     for m in store.list_modes(conn):
         out[m["id"]] = profiles.estimate_tokens(refresh(conn, client, m["id"]))
+    if store.is_layer(conn, store.CORE):
+        try:
+            import user_core
+            evidence.review_core(conn)     # keeps or rolls back an evolver-written core
+            user_core.auto_propose(conn)   # and writes the next one when a mode version was kept
+        except Exception as err:
+            print(f"user core skipped: {err}")
     return out
 
 

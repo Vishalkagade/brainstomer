@@ -302,9 +302,9 @@ class Handler(BaseHTTPRequestHandler):
                         live = store.current(conn, new_mode)
                         decision.update(mode=new_mode, switch=True, signal="spawned",
                                         spawned={"id": new_mode, "name": live["name"], "about": live["settings"].get("about", "")})
-                if decision["switch"] and vector is not None:
-                    # memory that matches these words, not just the latest: the vector is already paid for
-                    decision["recap"] = memory.relevant(conn, decision["mode"], vector, exclude_session=body["session_id"])
+                if decision["switch"]:
+                    # the mode's memory block for the page to append to the prompt; the closest exchanges too when a vector exists
+                    decision["recap"] = memory.recall(conn, decision["mode"], vector, exclude_session=body["session_id"])
                 if decision["signal"] not in ("too_short", "no_fingerprints"):
                     route_id = store.log_route(conn, body["session_id"], int(body.get("ts_ms") or 0), text, live_mode, decision, agent_last, final)
                     if future is not None and "jev" not in decision:
