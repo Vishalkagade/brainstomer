@@ -4,7 +4,7 @@
   "about": "Strength training in the gym: exercises, sets and reps, weights and progression, form and technique, muscles and joints, soreness, warm-up and recovery between sets.",
   "hue": 24,
   "tools": [],
-  "history_depth": 3,
+  "history_depth": 10,
   "model": null,
   "turn_detection": {
     "min_silence": 300,
