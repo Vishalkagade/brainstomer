@@ -14,6 +14,7 @@ the system prompt did. Recaps are built off the reply path: at page load and by 
 command. `/profile` only reads what is cached; `/route` builds one from the store.
 """
 
+import os
 import sys
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,7 @@ RELEVANT_K = 3        # on a router switch: the closest past exchanges to what w
 RELEVANT_MIN = 0.45   # measured 15 Sep: true matches 0.55-0.66, same mode other exercise ~0.49, unrelated <= 0.37
 MAX_AGE_DAYS = 14     # "not too old": nothing older than this comes back
 MAX_SESSIONS = 3      # "at least the last three conversations" (Vishal, 26 Sep)
+READ_ONLY = os.environ.get("BRAINSTORMER_READ_ONLY") == "1"  # same switch server.py and evolver.py read
 NO_RECAP = {"general"}
 
 
@@ -155,15 +157,16 @@ def refresh(conn, client: httpx.Client, mode_id: str) -> str:
             index_exchanges(conn, client, mode_id, convos)  # so relevant() has something to search
         except SystemExit as err:  # no embedding model answered: recency recap still works
             print(f"exchange index for {mode_id} skipped: {err}")
-        try:
-            evidence.judge_new(conn, mode_id, convos)  # what went wrong per turn, for the evolver; judged once
-            evidence.review(conn, mode_id)  # keeps or rolls back an evolver version once enough turns ran on it
-        except Exception as err:  # never lets a judging problem take the recap down
-            print(f"evidence for {mode_id} skipped: {err}")
-        try:
-            evolver.auto_propose(conn, mode_id, convos)  # proposes the next version when the floors are met
-        except Exception as err:
-            print(f"evolver for {mode_id} skipped: {err}")
+        if not READ_ONLY:  # the hosted demo cannot evolve, so judging its turns would spend Jev for nothing
+            try:
+                evidence.judge_new(conn, mode_id, convos)  # what went wrong per turn, for the evolver; judged once
+                evidence.review(conn, mode_id)  # keeps or rolls back an evolver version once enough turns ran on it
+            except Exception as err:  # never lets a judging problem take the recap down
+                print(f"evidence for {mode_id} skipped: {err}")
+            try:
+                evolver.auto_propose(conn, mode_id, convos)  # proposes the next version when the floors are met
+            except Exception as err:
+                print(f"evolver for {mode_id} skipped: {err}")
         text = recall(conn, mode_id)  # from the exchange index just updated: the last calls, no words to match yet
     conn.execute("INSERT OR REPLACE INTO recaps (mode_id, text, updated_at) VALUES (?, ?, ?)",
                  (mode_id, text, store.now()))
@@ -176,7 +179,7 @@ def refresh_all(conn, client: httpx.Client) -> dict[str, int]:
     out = {}
     for m in store.list_modes(conn):
         out[m["id"]] = profiles.estimate_tokens(refresh(conn, client, m["id"]))
-    if store.is_layer(conn, store.CORE):
+    if store.is_layer(conn, store.CORE) and not READ_ONLY:
         try:
             import user_core
             evidence.review_core(conn)     # keeps or rolls back an evolver-written core

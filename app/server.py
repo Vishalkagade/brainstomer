@@ -12,6 +12,8 @@ AssemblyAI directly over its own WebSocket, so nothing here has to be fast, and
 nothing here breaks the call if it restarts.
 """
 
+import base64
+import hmac
 import json
 import os
 import sqlite3
@@ -42,6 +44,7 @@ WEB = Path(__file__).resolve().parent / "web"
 TOKEN_TTL_SECONDS = 60
 
 READ_ONLY = os.environ.get("BRAINSTORMER_READ_ONLY") == "1"  # hosted demo: history visible, promote refused
+PASSWORD = os.environ.get("BRAINSTORMER_PASSWORD", "")  # hosted demo: set, and every request needs it (any username)
 JEV_MODE = os.environ.get("JEV", "on")  # on: Jev decides, embeddings fall back | shadow: logged only | off: never asked
 JEV_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jev")
 
@@ -109,7 +112,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _locked(self) -> bool:
+        """With a password set, refuse anything without it. The browser asks once and resends it on every request."""
+        if not PASSWORD:
+            return False
+        header = self.headers.get("Authorization", "")
+        try:
+            given = base64.b64decode(header.removeprefix("Basic ")).decode().split(":", 1)[1]
+        except (ValueError, IndexError):
+            given = ""
+        if hmac.compare_digest(given, PASSWORD):
+            return False
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Brainstormer"')  # makes the browser show the login box
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
+
     def do_GET(self) -> None:  # noqa: N802  (the base class names it this)
+        if self._locked():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -202,6 +224,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, page.encode(), "text/html; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802  (the base class names it this)
+        if self._locked():
+            return
         path = urlparse(self.path).path
         if path not in ("/tool", "/switch", "/route", "/promote"):
             self._send(404, b'{"error":"no such endpoint"}', "application/json")
