@@ -110,6 +110,22 @@ CREATE TABLE IF NOT EXISTS candidates (
     vector     TEXT,                          -- the utterance's embedding, so candidates can be clustered
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS evidence (
+    id         INTEGER PRIMARY KEY,
+    mode_id    TEXT NOT NULL REFERENCES modes(id),
+    session_id TEXT NOT NULL,
+    ts_ms      INTEGER NOT NULL,              -- the turn's reply start, same key the exchanges table uses
+    problem    TEXT NOT NULL,                 -- Jev's choice: fine | cut_off | ignored_question | ... (see jev.PROBLEMS)
+    confidence REAL NOT NULL,                 -- how sure Jev was of that choice
+    answered   REAL NOT NULL,                 -- 0..1: the reply answered what was asked
+    pushback   REAL NOT NULL,                 -- 0..1: the user's next turn corrected or resented the reply
+    p_json     TEXT NOT NULL,                 -- every option's probability, so a confidence floor can be picked from data
+    user_text  TEXT NOT NULL,
+    agent_text TEXT NOT NULL,
+    judged_at  TEXT NOT NULL,
+    UNIQUE (session_id, ts_ms)
+);
 """
 
 
@@ -132,6 +148,9 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
         ("routes", "jev_json", "TEXT", "Jev's verdict, from 21 Sep"),
         ("routes", "agent_last", "TEXT", "what the agent had just said, so an ask can be replayed"),
         ("routes", "final", "INTEGER", "1 = a finished sentence, 0 = still talking"),
+        ("versions", "parent_id", "INTEGER", "the version that was live when the evolver proposed this one"),
+        ("versions", "verdict", "TEXT", "kept | rolled_back, set once the version has been judged on evidence"),
+        ("versions", "verdict_why", "TEXT", "the numbers behind the verdict, in words"),
     ):
         if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
             try:
@@ -143,17 +162,23 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 
 
 def add_version(conn: sqlite3.Connection, mode_id: str, settings: dict,
-                prompt: str, rationale: str, source: str) -> int:
-    """Append a version. Does NOT make it live — see promote()."""
+                prompt: str, rationale: str, source: str, parent_id: int | None = None) -> int:
+    """Append a version. Does NOT make it live — see promote(). parent_id: what it was proposed from."""
     row = conn.execute("SELECT COALESCE(MAX(n), 0) + 1 AS n FROM versions WHERE mode_id = ?",
                        (mode_id,)).fetchone()
     cursor = conn.execute(
-        "INSERT INTO versions (mode_id, n, settings_json, prompt, rationale, source, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (mode_id, row["n"], json.dumps(settings, indent=2), prompt, rationale, source, now()),
+        "INSERT INTO versions (mode_id, n, settings_json, prompt, rationale, source, created_at, parent_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (mode_id, row["n"], json.dumps(settings, indent=2), prompt, rationale, source, now(), parent_id),
     )
     conn.commit()
     return cursor.lastrowid
+
+
+def set_verdict(conn: sqlite3.Connection, version_id: int, verdict: str, why: str) -> None:
+    """Once per version: the evidence has spoken. kept or rolled_back."""
+    conn.execute("UPDATE versions SET verdict = ?, verdict_why = ? WHERE id = ?", (verdict, why, version_id))
+    conn.commit()
 
 
 def promote(conn: sqlite3.Connection, version_id: int) -> None:
@@ -175,11 +200,15 @@ def add_mode(conn: sqlite3.Connection, mode_id: str, name: str, settings: dict,
     return version_id
 
 
+CORE = "user_core"  # the L1 layer, stored like a mode (versions, diff, promote) but never routed to or switched into
+
+
 def list_modes(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every mode a call can be in. The user core is a layer, not a mode, and is left out here."""
     return conn.execute(
         "SELECT m.id, m.name, m.status, v.n, v.source, v.created_at "
         "FROM modes m JOIN versions v ON v.id = m.current_version_id "
-        "WHERE m.status != 'archived' "
+        "WHERE m.status NOT IN ('archived', 'layer') "
         "ORDER BY (m.id != 'general'), m.id"  # general first: it is the mode a call starts in
     ).fetchall()
 
@@ -231,7 +260,7 @@ def history(conn: sqlite3.Connection, mode_id: str) -> list[dict]:
     if live is None:
         raise SystemExit(f"No mode '{mode_id}'")
     rows = conn.execute(
-        "SELECT v.id, v.n, v.source, v.created_at, v.rationale, "
+        "SELECT v.id, v.n, v.source, v.created_at, v.rationale, v.parent_id, v.verdict, v.verdict_why, "
         "       (SELECT COUNT(DISTINCT session_id) FROM switches s WHERE s.version_id = v.id) AS calls "  # 0 = never ran in a call
         "FROM versions v WHERE v.mode_id = ? ORDER BY v.n", (mode_id,))
     return [dict(r) | {"live": r["id"] == live[0]} for r in rows]
@@ -383,6 +412,49 @@ def exchange_sessions(conn: sqlite3.Connection, mode_id: str) -> set[str]:
     return {r[0] for r in conn.execute("SELECT DISTINCT session_id FROM exchanges WHERE mode_id = ?", (mode_id,))}
 
 
+def add_evidence(conn: sqlite3.Connection, mode_id: str, session_id: str, ts_ms: int, verdict: dict,
+                 user_text: str, agent_text: str) -> bool:
+    """One judged turn. False when this turn was judged before (same session and time): nothing written."""
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO evidence (mode_id, session_id, ts_ms, problem, confidence, answered, pushback, "
+        "p_json, user_text, agent_text, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (mode_id, session_id, ts_ms, verdict["problem"], verdict["confidence"], verdict["answered"],
+         verdict["pushback"], json.dumps(verdict.get("p", {})), user_text, agent_text, now()))
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def evidence_for(conn: sqlite3.Connection, mode_id: str) -> list[dict]:
+    """Every judged turn of a mode, oldest first."""
+    rows = conn.execute("SELECT session_id, ts_ms, problem, confidence, answered, pushback, user_text, agent_text "
+                        "FROM evidence WHERE mode_id = ? ORDER BY session_id, ts_ms", (mode_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def evidence_by_version(conn: sqlite3.Connection, mode_id: str) -> dict[int, list[dict]]:
+    """Judged turns grouped by the version that answered them: the switch live at the turn's time in that call."""
+    rows = conn.execute(
+        "SELECT e.session_id, e.ts_ms, e.problem, e.confidence, e.answered, e.pushback, e.user_text, e.agent_text, "
+        "  e.judged_at, (SELECT s.version_id FROM switches s WHERE s.session_id = e.session_id AND s.ts_ms <= e.ts_ms "
+        "   ORDER BY s.ts_ms DESC LIMIT 1) AS version_id "
+        "FROM evidence e WHERE e.mode_id = ? ORDER BY e.session_id, e.ts_ms", (mode_id,)).fetchall()
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        if r["version_id"] is not None:
+            out.setdefault(r["version_id"], []).append(dict(r))
+    return out
+
+
+def judged_turns(conn: sqlite3.Connection, mode_id: str) -> set[tuple[str, int]]:
+    """(session, ts_ms) of every turn already judged, so a refresh only asks about new ones."""
+    return {(r[0], r[1]) for r in conn.execute("SELECT session_id, ts_ms FROM evidence WHERE mode_id = ?", (mode_id,))}
+
+
+def is_layer(conn: sqlite3.Connection, mode_id: str) -> bool:
+    row = conn.execute("SELECT status FROM modes WHERE id = ?", (mode_id,)).fetchone()
+    return bool(row) and row["status"] == "layer"
+
+
 def set_status(conn: sqlite3.Connection, mode_id: str, status: str) -> None:
     if status not in ("provisional", "established", "archived"):
         raise SystemExit(f"Unknown status {status!r}")
@@ -398,10 +470,22 @@ def switches_for(conn: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]
     ).fetchall()
 
 
+def seed_core(conn: sqlite3.Connection, path: Path) -> bool:
+    """The user core's v1 from l1_user_core.md, once. After that the store is the truth and the file is a seed."""
+    if conn.execute("SELECT 1 FROM modes WHERE id = ?", (CORE,)).fetchone():
+        return False
+    add_mode(conn, CORE, "You", {"name": "You", "hue": 40}, path.read_text().strip(),
+             rationale=f"Hand-written seed, loaded from {path.name}", source="seed", status="layer")
+    return True
+
+
 def seed(conn: sqlite3.Connection, modes_dir: Path) -> None:
-    """Load each mode file as v1. Skips modes that already exist, so it is safe to rerun."""
+    """Load each mode file as v1, and the user core. Skips what already exists, so it is safe to rerun."""
     import profiles  # here, not at the top: profiles will import store, and a top-level import would loop
 
+    core = modes_dir.parent / "l1_user_core.md"
+    if core.exists():
+        print(f"{CORE:<12} {'seeded as v1 from' if seed_core(conn, core) else 'already in the store, skipped'} {core.name}")
     for path in sorted(modes_dir.glob("*.md")):
         mode_id = path.stem
         if conn.execute("SELECT 1 FROM modes WHERE id = ?", (mode_id,)).fetchone():
@@ -471,6 +555,9 @@ def main() -> None:
         print("Store is empty. Run: app/store.py seed")
         return
     print(f"{'mode':<12} {'name':<12} {'status':<12} live  source   since")
+    if is_layer(conn, CORE):
+        core = current(conn, CORE)
+        print(f"{CORE:<12} {'You':<12} {'layer':<12} v{core['n']:<4} (the L1 user core)")
     for m in rows:
         print(f"{m['id']:<12} {m['name']:<12} {m['status']:<12} v{m['n']:<4} "
               f"{m['source']:<8} {m['created_at'][:19].replace('T', ' ')}")

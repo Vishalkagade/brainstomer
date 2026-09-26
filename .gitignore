@@ -13,3 +13,5 @@ prototypes
 
 # The mode store. Binary, per machine; app/store.py dump writes it out as markdown.
 app/data/
+
+

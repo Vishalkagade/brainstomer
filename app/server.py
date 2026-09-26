@@ -87,19 +87,15 @@ def evolution_overview(conn) -> dict:
         settings = store.current(conn, m["id"])["settings"]
         modes.append({"id": m["id"], "name": m["name"], "status": m["status"],
                       "hue": settings.get("hue", 190), "versions": store.history(conn, m["id"])})
+    if store.is_layer(conn, store.CORE):  # the user core, last: same versions, diff and buttons as a mode
+        core = store.current(conn, store.CORE)
+        modes.append({"id": store.CORE, "name": core["name"], "status": "layer",
+                      "hue": core["settings"].get("hue", 40), "versions": store.history(conn, store.CORE)})
     return {"modes": modes, "can_promote": not READ_ONLY}
 
 
 def promote_version(conn, version_id: int, embed_one=None) -> dict:
-    """Move a mode's live pointer. The router fingerprint is re-embedded only if the words it is built from changed."""
-    target = store.version(conn, version_id)
-    before = router.fingerprint_text(store.current(conn, target["mode_id"]))
-    store.promote(conn, version_id)
-    after = router.fingerprint_text(store.current(conn, target["mode_id"]))
-    refreshed = before != after
-    if refreshed:
-        (embed_one or router.fingerprint_one)(conn, target["mode_id"])
-    return {"mode": target["mode_id"], "live": version_id, "n": target["n"], "fingerprint_refreshed": refreshed}
+    return router.promote(conn, version_id, embed_one)  # lives in router since 25 Sep: the evidence review promotes too
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -343,6 +339,9 @@ def main() -> None:
                 raise
             port += 1
 
+    with closing(store.connect()) as conn:
+        if store.seed_core(conn, Path(__file__).resolve().parent / "prompts" / "l1_user_core.md"):
+            print("user core seeded into the store as v1 from l1_user_core.md")
     if JEV_MODE != "off":
         JEV_POOL.submit(jev.warm)  # open the connection now, not on the first route ask of the first call
     print(f"agent  {AGENT_ID}")

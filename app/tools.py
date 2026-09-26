@@ -49,13 +49,29 @@ def shape_answer(payload: dict) -> dict:
         stop = clipped.rfind(". ")
         answer = clipped[: stop + 1] if stop > MAX_ANSWER_CHARS // 2 else clipped
 
-    sources = []
-    for citation in (payload.get("citations") or [])[:MAX_SOURCES]:
+    sources, dates = [], []
+    for citation in (payload.get("citations") or []):
         title = (citation.get("title") or "").strip()
-        if title:
+        if title and len(sources) < MAX_SOURCES:
             sources.append(title)
+        if citation.get("publishedDate"):
+            dates.append(citation["publishedDate"][:10])
 
-    return {"answer": answer, "sources": sources}
+    out = {"answer": answer, "sources": sources}
+    if dates:
+        out["newest_source"] = max(dates)  # so the agent can say how fresh the news is, and notice when it is old
+    return out
+
+
+def today() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%-d %B %Y")
+
+
+def search_instructions() -> str:
+    """Exa's own model writes the answer; without the date it also guesses the year."""
+    return (f"Today is {today()}. Prefer the most recent sources and say when the events happened. "
+            "If nothing recent matches, say so instead of describing older events as current.")
 
 
 def web_search(query: str) -> dict:
@@ -65,7 +81,8 @@ def web_search(query: str) -> dict:
     bodies. That single flag is the difference between ~1,000 tokens and
     ~24,000 — see the measurements at the top of this file.
     """
-    response = exa_client().post(EXA_ANSWER_URL, json={"query": query, "text": False})
+    response = exa_client().post(EXA_ANSWER_URL, json={"query": query, "text": False,
+                                                       "systemPrompt": search_instructions()})
     response.raise_for_status()
     return shape_answer(response.json())
 
@@ -79,7 +96,10 @@ TOOLS = {
                 "answer depends on something recent, changing, or specific that "
                 "you are not certain of such as  news, prices, results, releases, who "
                 "currently holds a position. Prefer calling it over guessing or "
-                "saying your knowledge may be out of date."
+                "saying your knowledge may be out of date. Today's date is in your "
+                "instructions: put the current month and year in the query when "
+                "recency matters. The result's newest_source says how fresh the "
+                "news is; mention it when it is not from the last few days."
             ),
             "parameters": {
                 "type": "object",

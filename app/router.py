@@ -88,6 +88,21 @@ def fingerprint_one(conn, mode_id: str, seed_vectors: list[list[float]] | None =
     conn.commit()
 
 
+def promote(conn, version_id: int, embed_one=None) -> dict:
+    """Move a mode's live pointer. The fingerprint is re-embedded only if the words it is built from changed."""
+    target = store.version(conn, version_id)
+    if store.is_layer(conn, target["mode_id"]):  # the user core is never routed to: nothing to embed
+        store.promote(conn, version_id)
+        return {"mode": target["mode_id"], "live": version_id, "n": target["n"], "fingerprint_refreshed": False}
+    before = fingerprint_text(store.current(conn, target["mode_id"]))
+    store.promote(conn, version_id)
+    after = fingerprint_text(store.current(conn, target["mode_id"]))
+    refreshed = before != after
+    if refreshed:
+        (embed_one or fingerprint_one)(conn, target["mode_id"])
+    return {"mode": target["mode_id"], "live": version_id, "n": target["n"], "fingerprint_refreshed": refreshed}
+
+
 def build(conn) -> list[str]:
     """One fingerprint per mode from its live version, plus the filler anchor. Rebuild after any promote."""
     lives = [store.current(conn, m["id"]) for m in store.list_modes(conn)]

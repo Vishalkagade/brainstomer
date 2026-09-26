@@ -1,18 +1,23 @@
 """Rewrite a mode's L2 from what was actually said in it.
 
     .venv/bin/python app/evolver.py gym              show the conversations gym has accumulated
-    .venv/bin/python app/evolver.py gym propose      ask the model for the next version, store it UNPROMOTED
+    .venv/bin/python app/evolver.py gym propose      ask the model for the next version and make it LIVE
+    .venv/bin/python app/evolver.py gym propose --hold     store it without promoting (the old behaviour)
     .venv/bin/python app/evolver.py gym propose --force    ignore the evidence threshold (testing only)
 
 Reading: a turn belongs to the mode version that was live when its reply started
 (switches table joined to AssemblyAI's timeline). Writing: the model gets the live
 version, its cap, and the conversations, and returns a full replacement. We
-validate it, check the cap, and add it as a new version. Nothing here promotes.
+validate it, check the cap, and add it as a new version. Since 25 Sep the new version goes
+live at once; the evidence pass judges it after a floor of turns and rolls it back if it did
+worse than the version it came from (evidence.review). The buttons on the evolution page stay.
 """
 
 import json
+import os
 import re
 import sys
+import threading
 from contextlib import closing
 from pathlib import Path
 
@@ -21,6 +26,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
 import profiles  # noqa: E402
+import router  # noqa: E402
 import sessions  # noqa: E402
 import store  # noqa: E402
 import tools  # noqa: E402
@@ -37,6 +43,8 @@ MODELS = [
 ]
 FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 DEFAULT_EVOLVE_AFTER = {"sessions": 3, "turns": 12}  # used when a mode's settings do not say; a guess
+_proposing: set[str] = set()   # modes with a proposal in flight in this process; two page loads must not pay twice
+_proposing_lock = threading.Lock()
 
 # What the evolver may set, and within what bounds. Anything else in its output is an error.
 TRANSCRIPTION_MODES = ("balanced", "min_latency", "max_accuracy")
@@ -83,6 +91,17 @@ def usable(turn: dict) -> bool:
     return confidence is None or confidence >= MIN_CONFIDENCE
 
 
+def neighbours(turns: list[dict]) -> list[dict]:
+    """Give every turn the agent line before it and the user line after it, from the whole call.
+
+    The evidence judge needs both, and the mode's own turn list has gaps where other modes answered.
+    """
+    for i, t in enumerate(turns):
+        t["agent_before"] = turns[i - 1].get("agent_text") or "" if i else ""
+        t["user_next"] = turns[i + 1].get("user_transcript") or "" if i + 1 < len(turns) else ""
+    return turns
+
+
 def conversations(conn, client: httpx.Client, mode_id: str) -> list[dict]:
     """Every session's turns that were answered in `mode_id`, oldest session first."""
     session_ids = [r["session_id"] for r in conn.execute(
@@ -93,7 +112,7 @@ def conversations(conn, client: httpx.Client, mode_id: str) -> list[dict]:
             session = sessions.get_session(client, session_id)
         except httpx.HTTPStatusError:
             continue  # deleted on AssemblyAI's side; nothing to read
-        turns = sessions.get_timeline(client, session)
+        turns = neighbours(sessions.get_timeline(client, session))
         switches = [dict(r) for r in store.switches_for(conn, session_id)]
         mine = [(t, sw) for t, sw in attribute(turns, switches)
                 if sw and sw["mode_id"] == mode_id and usable(t)]
@@ -198,8 +217,40 @@ def transcript(convos: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_messages(live: dict, convos: list[dict]) -> list[dict]:
-    """The whole ask, as chat messages. Everything the model needs to respect is in here."""
+def tried(conn, live: dict) -> list[str]:
+    """Versions proposed from the live one and rolled back: the model must not propose them again."""
+    rows = conn.execute("SELECT n, verdict_why FROM versions WHERE parent_id = ? AND verdict = 'rolled_back' ORDER BY n",
+                        (live["version_id"],)).fetchall()
+    return [f"v{r['n']} was tried and {r['verdict_why']}" for r in rows]
+
+
+def judged(rows: list[dict]) -> str:
+    """Counts first, then only the turns Jev marked. Replaces the full transcript once the evidence pass has run."""
+    import evidence
+    lines = [f"Judged turns: {evidence.headline(rows)}."]
+    bad = evidence.failing(rows)
+    if not bad:
+        lines.append("Nothing went wrong in any judged turn. Return the current version unchanged.")
+        return "\n".join(lines)
+    lines.append(f"Only the {len(bad)} turn(s) with a problem are shown; the rest went well.\n")
+    for r in bad:
+        marks = []
+        if r["problem"] != "fine":
+            marks.append(f"{r['problem'].replace('_', ' ')}, {r['confidence']:.0%} sure")
+        if r["pushback"] >= evidence.jev.PUSHBACK_MIN:
+            marks.append(f"user pushed back next ({r['pushback']:.2f})")
+        lines.append(f"USER: {r['user_text']}")
+        lines.append(f"AGENT: {r['agent_text']}   [{'; '.join(marks)}]")
+    return "\n".join(lines)
+
+
+def build_messages(live: dict, convos: list[dict], rows: list[dict] | None = None,
+                   tried_lines: list[str] | None = None) -> list[dict]:
+    """The whole ask, as chat messages. Everything the model needs to respect is in here.
+
+    With judged rows the model sees counts and failing turns; without them (Jev off) the whole transcript.
+    tried_lines: earlier proposals from this version that the evidence rolled back, so they are not repeated.
+    """
     cap = profiles.CAPS["l2"]
     used = profiles.estimate_tokens(live["prompt"])
     rules = f"""You maintain the MODE OVERLAY of a voice agent: the part of its system prompt that describes one area of the user's life, plus the runtime settings for how it listens in that area. You will propose the next version from real conversations.
@@ -230,9 +281,12 @@ This is a voice agent: the prompt must not ask for markdown, lists, or anything 
 ## prompt
 {live['prompt']}
 
-# Conversations answered by this mode
+# {"What went wrong, judged turn by turn" if rows else "Conversations answered by this mode"}
 
-{transcript(convos)}"""
+{judged(rows) if rows else transcript(convos)}"""
+    if tried_lines:
+        current += ("\n\n# Already tried from this version and undone by the evidence; do not propose the same again\n\n"
+                    + "\n".join(tried_lines))
     return [{"role": "system", "content": rules}, {"role": "user", "content": current}]
 
 
@@ -274,13 +328,15 @@ def parse_proposal(text: str) -> dict:
     return data
 
 
-def propose(conn, live: dict, convos: list[dict], force: bool = False) -> int:
-    """Ask the model, check the answer, store it as an unpromoted version. Returns the version id."""
+def propose(conn, live: dict, convos: list[dict], force: bool = False, hold: bool = False) -> int:
+    """Ask the model, check the answer, store the version and make it live (hold=True: store only). Returns its id."""
     ok, why = enough_evidence(live["settings"], convos)
     if not ok and not force:
         raise SystemExit(f"Not enough evidence to evolve {live['mode']}: {why}. Pass --force to override.")
 
-    answer, model = call_model(build_messages(live, convos))
+    # what THIS version did wrong; a version with nothing judged yet falls back to the mode's whole evidence
+    rows = store.evidence_by_version(conn, live["mode"]).get(live["version_id"]) or store.evidence_for(conn, live["mode"])
+    answer, model = call_model(build_messages(live, convos, rows, tried(conn, live)))
     proposal = parse_proposal(answer)
     errors = validate(proposal["settings"])
     if errors:
@@ -293,8 +349,57 @@ def propose(conn, live: dict, convos: list[dict], force: bool = False) -> int:
     rationale = proposal["rationale"].strip()
     if proposal["evicted"]:
         rationale += "\n\nEvicted: " + "; ".join(str(e) for e in proposal["evicted"])
-    rationale += f"\n\nEvidence: {why}. Model: {model.rsplit('/', 1)[-1]}."
-    return store.add_version(conn, live["mode"], proposal["settings"], prompt, rationale, source="evolver")
+    import evidence
+    rationale += f"\n\nEvidence: {why}; {evidence.headline(rows)}. Model: {model.rsplit('/', 1)[-1]}."
+    version_id = store.add_version(conn, live["mode"], proposal["settings"], prompt, rationale, source="evolver",
+                                   parent_id=live["version_id"])
+    if not hold:
+        router.promote(conn, version_id)  # judged by evidence.review once JUDGE_AFTER turns have run on it
+    return version_id
+
+
+def due(conn, live: dict) -> tuple[bool, str]:
+    """Should the evolver propose from the live version by itself? Counts only judged turns on that version,
+    and only those judged since its last proposal, so the same evidence never pays for two proposals."""
+    row = conn.execute("SELECT source, parent_id, verdict FROM versions WHERE id = ?", (live["version_id"],)).fetchone()
+    if row["source"] == "evolver" and row["parent_id"] and not row["verdict"]:
+        return False, f"v{live['n']} is still waiting for its verdict"
+    rows = store.evidence_by_version(conn, live["mode"]).get(live["version_id"], [])
+    last = conn.execute("SELECT MAX(created_at) AS at FROM versions WHERE parent_id = ?", (live["version_id"],)).fetchone()["at"]
+    if last:
+        rows = [r for r in rows if r["judged_at"] > last]
+    need = live["settings"].get("evolve_after") or DEFAULT_EVOLVE_AFTER
+    have_sessions, have_turns = len({r["session_id"] for r in rows}), len(rows)
+    ok = have_sessions >= need["sessions"] and have_turns >= need["turns"]
+    since = " since the last proposal" if last else ""
+    return ok, f"{have_turns} judged turn(s) in {have_sessions} call(s) on v{live['n']}{since}, need {need['turns']} in {need['sessions']}"
+
+
+def auto_propose(conn, mode_id: str, convos: list[dict]) -> int | None:
+    """The unattended path: propose and go live when due() says so. Returns the version id or None."""
+    if os.environ.get("AUTO_EVOLVE", "on") == "off" or os.environ.get("BRAINSTORMER_READ_ONLY") == "1":
+        return None
+    live = store.current(conn, mode_id)
+    ok, why = due(conn, live)
+    if not ok:
+        return None
+    with _proposing_lock:
+        if mode_id in _proposing:
+            return None
+        _proposing.add(mode_id)
+    try:
+        version_id = propose(conn, live, convos)
+        conn.execute("UPDATE versions SET rationale = rationale || ' Proposed by itself: ' || ? || '.' WHERE id = ?",
+                     (why, version_id))
+        conn.commit()
+        print(f"evolver: {mode_id} v{live['n']} -> new version {version_id} live ({why})")
+        return version_id
+    except SystemExit as err:  # not enough conversations, an invalid answer, no model: say so, try again next refresh
+        print(f"evolver: {mode_id} not evolved: {err}")
+        return None
+    finally:
+        with _proposing_lock:
+            _proposing.discard(mode_id)
 
 
 def main() -> None:
@@ -303,24 +408,31 @@ def main() -> None:
     mode_id = sys.argv[1]
     do_propose = "propose" in sys.argv[2:]
     force = "--force" in sys.argv[2:]
+    hold = "--hold" in sys.argv[2:]
     config.load_env()
 
     with closing(store.connect()) as conn, httpx.Client(headers=config.headers(), timeout=30) as client:
         live = store.current(conn, mode_id)
         convos = conversations(conn, client, mode_id)
         ok, why = enough_evidence(live["settings"], convos)
+        auto_ok, auto_why = due(conn, live)
 
         if do_propose:
-            version_id = propose(conn, live, convos, force=force)
+            version_id = propose(conn, live, convos, force=force, hold=hold)
             row = conn.execute("SELECT n, rationale FROM versions WHERE id = ?", (version_id,)).fetchone()
-            print(f"Stored {live['name']} v{row['n']} as version id {version_id}, NOT live.\n")
+            import evidence
+            state = ("NOT live (held)" if hold else
+                     f"LIVE now; judged against v{live['n']} after {evidence.JUDGE_AFTER['turns']} turns "
+                     f"in {evidence.JUDGE_AFTER['sessions']} calls")
+            print(f"Stored {live['name']} v{row['n']} as version id {version_id}, {state}.\n")
             print(row["rationale"])
             print(f"\nReview:   app/store.py diff {live['version_id']} {version_id}")
-            print(f"Go live:  app/store.py promote {version_id}")
+            print(f"{'Go live' if hold else 'Undo'}:  app/store.py promote {version_id if hold else live['version_id']}")
             return
 
     print(f"{live['name']}  live v{live['n']}  {len(convos)} conversation(s) on record  "
-          f"[{'ready to evolve' if ok else 'not yet'}: {why}]\n")
+          f"[{'ready to evolve' if ok else 'not yet'}: {why}]")
+    print(f"by itself: {'due' if auto_ok else 'not yet'}: {auto_why}\n")
     for c in convos:
         print(f"-- {c['session_id']}  {c['created_at'][:16].replace('T', ' ')}  "
               f"{len(c['turns'])} turns  answered by version id(s) {c['version_ids']}")

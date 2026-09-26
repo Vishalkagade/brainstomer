@@ -76,14 +76,21 @@ def list_modes() -> list[str]:
         return [row["id"] for row in store.list_modes(conn)]
 
 
+def today_line() -> str:
+    """The one fact no layer can hold: the model guesses the year otherwise (it searched January 2025 on 25 Sep 2026)."""
+    from datetime import datetime
+    return f"Today is {datetime.now().strftime('%A, %-d %B %Y')}."
+
+
 def assemble(mode: str) -> dict:
     """Build everything needed to swap into `mode` on an open socket."""
     bedrock = read_layer(PROMPTS / "l0_bedrock.md")
-    user_core = read_layer(PROMPTS / "l1_user_core.md")
 
-    # L2 comes from the store's live version, not the .md file (that was only the v1 seed)
+    # L1 and L2 come from the store's live versions, not the .md files (those were only the v1 seeds)
     with closing(store.connect()) as conn:  # closing() actually closes; bare `with conn:` only ends a transaction
         live = store.current(conn, mode)
+        user_core = (store.current(conn, store.CORE)["prompt"] if store.is_layer(conn, store.CORE)
+                     else read_layer(PROMPTS / "l1_user_core.md"))  # a store from before 26 Sep: the file, until seeded
     settings, overlay = live["settings"], live["prompt"]
 
     budget = {
@@ -98,7 +105,7 @@ def assemble(mode: str) -> dict:
     system_prompt = (
         f"{bedrock}\n\n"
         f"=== USER CORE — facts and constraints, true in every mode ===\n\n"
-        f"{user_core}\n\n"
+        f"{today_line()}\n\n{user_core}\n\n"
         f"=== MODE: {settings.get('name', mode).upper()} — style within this domain ===\n\n"
         f"{overlay}"
     )

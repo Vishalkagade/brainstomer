@@ -22,6 +22,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
+import evidence  # noqa: E402
 import evolver  # noqa: E402
 import profiles  # noqa: E402
 import router  # noqa: E402
@@ -35,10 +36,12 @@ MAX_SESSIONS = 5      # and never more than this many past calls
 NO_RECAP = {"general"}
 
 
-def recent_turns(conn, client: httpx.Client, mode_id: str, depth: int) -> list[dict]:
+def recent_turns(conn, client: httpx.Client, mode_id: str, depth: int, convos: list[dict] | None = None) -> list[dict]:
     """The last `depth` usable exchanges in this mode, oldest first, from recent calls only."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)).isoformat()
-    convos = [c for c in evolver.conversations(conn, client, mode_id) if c["created_at"] >= cutoff][-MAX_SESSIONS:]
+    if convos is None:
+        convos = evolver.conversations(conn, client, mode_id)
+    convos = [c for c in convos if c["created_at"] >= cutoff][-MAX_SESSIONS:]
     turns = [t for c in convos for t in c["turns"]]
     return turns[-depth:]
 
@@ -59,12 +62,13 @@ def render(turns: list[dict], mode_name: str) -> str:
     return head + body
 
 
-def index_exchanges(conn, client: httpx.Client, mode_id: str) -> int:
+def index_exchanges(conn, client: httpx.Client, mode_id: str, convos: list[dict] | None = None) -> int:
     """Embed and store this mode's past exchanges. Only sessions not seen before are paid for."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)).isoformat()
     seen = store.exchange_sessions(conn, mode_id)
-    fresh = [c for c in evolver.conversations(conn, client, mode_id)
-             if c["created_at"] >= cutoff and c["session_id"] not in seen]
+    if convos is None:
+        convos = evolver.conversations(conn, client, mode_id)
+    fresh = [c for c in convos if c["created_at"] >= cutoff and c["session_id"] not in seen]
     rows = [{"session_id": c["session_id"], "ts_ms": t.get("agent_reply_started_at_ms") or 0,
              "user_text": t["user_transcript"].strip(), "agent_text": t["agent_text"].strip()}
             for c in fresh for t in c["turns"]]
@@ -109,12 +113,19 @@ def refresh(conn, client: httpx.Client, mode_id: str) -> str:
     if mode_id in NO_RECAP:
         text = ""
     else:
+        convos = evolver.conversations(conn, client, mode_id)  # one fetch, three readers
         try:
-            index_exchanges(conn, client, mode_id)  # so relevant() has something to search
+            index_exchanges(conn, client, mode_id, convos)  # so relevant() has something to search
         except SystemExit as err:  # no embedding model answered: recency recap still works
             print(f"exchange index for {mode_id} skipped: {err}")
+        try:
+            evidence.judge_new(conn, mode_id, convos)  # what went wrong per turn, for the evolver; judged once
+            evidence.review(conn, mode_id)  # keeps or rolls back an evolver version once enough turns ran on it
+            evolver.auto_propose(conn, mode_id, convos)  # and proposes the next one when the floors are met
+        except Exception as err:  # never lets a judging problem take the recap down
+            print(f"evidence for {mode_id} skipped: {err}")
         depth = int(live["settings"].get("history_depth") or 10)
-        text = render(recent_turns(conn, client, mode_id, depth), live["name"])
+        text = render(recent_turns(conn, client, mode_id, depth, convos), live["name"])
     conn.execute("INSERT OR REPLACE INTO recaps (mode_id, text, updated_at) VALUES (?, ?, ?)",
                  (mode_id, text, store.now()))
     conn.commit()
