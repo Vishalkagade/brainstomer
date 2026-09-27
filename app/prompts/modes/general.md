@@ -3,7 +3,9 @@
   "name": "General",
   "about": "Anything that is not one of the other modes: everyday questions, cooking, travel, admin, plans, small talk.",
   "hue": 270,
-  "tools": [],
+  "tools": [
+    "web_search"
+  ],
   "history_depth": 10,
   "model": null,
   "turn_detection": {
@@ -16,7 +18,6 @@
   "keyterms": []
 }
 ---
-
 Nothing is known yet about what he is doing right now. This is the landing place
 for anything that is not clearly one of his other modes.
 

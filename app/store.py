@@ -506,12 +506,27 @@ def seed(conn: sqlite3.Connection, modes_dir: Path) -> None:
         print(f"{mode_id:<12} seeded as v1 from {path.name}")
 
 
+def dump(conn: sqlite3.Connection, modes_dir: Path, mode_ids: list[str]) -> None:
+    """Write each mode's live version back into its seed file, so a fresh install starts where the store is now."""
+    for mode_id in mode_ids:
+        live = current(conn, mode_id)
+        path = modes_dir / f"{mode_id}.md"
+        path.write_text(f"---\n{json.dumps(live['settings'], indent=2)}\n---\n{live['prompt'].strip()}\n")
+        print(f"{mode_id:<12} v{live['n']} written to {path.name}")
+
+
 def main() -> None:
     conn = connect()
     argument = sys.argv[1] if len(sys.argv) > 1 else ""
+    modes_dir = Path(__file__).resolve().parent / "prompts" / "modes"
 
     if argument == "seed":
-        seed(conn, Path(__file__).resolve().parent / "prompts" / "modes")
+        seed(conn, modes_dir)
+        return
+
+    if argument == "dump":  # named modes, or every mode that already has a seed file
+        ids = sys.argv[2:] or [p.stem for p in sorted(modes_dir.glob("*.md"))]
+        dump(conn, modes_dir, ids)
         return
 
     if argument == "show":
