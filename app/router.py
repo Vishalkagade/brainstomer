@@ -228,6 +228,18 @@ def decide_jev(text: str, live_mode: str | None, verdict: dict, final: bool, age
     return {"mode": live_mode, "switch": False, "signal": "unknown" if target == GENERAL else "jev", **base}
 
 
+def new_topic(decision: dict, final: bool) -> bool:
+    """Is this finished sentence about none of the modes? Then it is a candidate for a mode of its own.
+    A reply to the agent stays where it is, but when Jev's top guess is still "none" the subject is new all the same:
+    in a real conversation nearly every sentence is a reply, so only counting cold openings never reaches a cluster."""
+    if not final:
+        return False
+    if decision["signal"] == "unknown":
+        return True
+    jev = decision.get("jev") or {}
+    return decision["signal"] == "reply" and jev.get("mode") == "none"
+
+
 def compare(conn, fresh: bool = False) -> None:
     """Embedding router versus the Jev rule on every logged ask. --fresh re-asks Jev with today's modes and the logged context."""
     rows = [dict(r) for r in conn.execute("SELECT text, live_mode, mode, switch, signal, embed_ms, jev_json, agent_last, final FROM routes "

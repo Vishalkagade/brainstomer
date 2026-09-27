@@ -319,7 +319,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif future is not None and future.done():  # shadow: never wait; a late verdict is logged below
                     decision["jev"] = future.result()
                 vector = decision.pop("_vector", None)  # 4096 floats: for the store, not for the page
-                if decision["signal"] == "unknown" and final:  # once per utterance, not per partial
+                if router.new_topic(decision, final):  # once per utterance, not per partial
                     cid = store.add_candidate(conn, router.GENERAL, body["session_id"], "unknown_topic", text, vector)
                     new_mode = spawner.maybe_spawn(conn, body["session_id"], cid, group_fn=spawner.group_and_name)
                     if new_mode:
@@ -369,6 +369,8 @@ def main() -> None:
         core = profiles.core_file()
         if store.seed_core(conn, core):
             print(f"user core seeded into the store as v1 from {core.name}")
+        if not conn.execute("SELECT 1 FROM fingerprints LIMIT 1").fetchone():  # fresh store: one embedding call, once
+            print(f"router fingerprints built for {', '.join(router.build(conn))}")
     if JEV_MODE != "off":
         JEV_POOL.submit(jev.warm)  # open the connection now, not on the first route ask of the first call
     print(f"agent  {AGENT_ID}")
