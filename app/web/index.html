@@ -4,6 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Brainstormer</title>
+  <meta name="description" content="A voice agent that follows which part of your life you are in, remembers it, and rewrites its own instructions from the turns that went wrong." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%2358c9e6' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%2358c9e6'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap" rel="stylesheet" />
@@ -22,7 +24,7 @@
       --text: #d6e2ea;
       --dim: #6f8697;
 
-      --accent: hsl(var(--hue) 85% 62%);
+      --accent: hsl(var(--hue) 74% 64%);  /* under 80% saturation: General's violet stops glowing, contrast on ink stays over 5:1 */
       --accent-soft: hsl(var(--hue) 70% 62% / 0.16);
       --accent-line: hsl(var(--hue) 60% 55% / 0.4);
 
@@ -34,7 +36,7 @@
 
     body {
       margin: 0;
-      min-height: 100vh;
+      min-height: 100dvh;  /* not 100vh: the mobile address bar would make the page jump */
       background: var(--ink);
       color: var(--text);
       font: 400 15px/1.5 var(--ui);
@@ -153,9 +155,10 @@
       border-radius: 999px;
       padding: 7px 15px;
       cursor: pointer;
-      transition: color .25s, border-color .25s, background-color .25s;
+      transition: color .25s, border-color .25s, background-color .25s, transform .15s;
     }
-    .mode:hover { color: var(--text); }
+    .mode:hover { color: var(--text); border-color: var(--dim); }
+    .mode:active { transform: scale(.97); }  /* a press you can feel */
     .mode small { font-size: 11px; font-weight: 400; color: var(--dim); margin-left: 6px; }
     .meta a { color: var(--dim); text-decoration: none; }
     .meta a:hover { color: var(--accent); }
@@ -195,8 +198,10 @@
       border-radius: 999px;
       padding: 8px 20px;
       cursor: pointer;
-      transition: background-color .6s ease, opacity .2s;
+      transition: background-color .6s ease, opacity .2s, transform .15s, filter .2s;
     }
+    #btn:hover { filter: brightness(1.08); }
+    #btn:active { transform: scale(.97); }
     #btn.live {
       background: transparent;
       color: var(--text);
@@ -227,6 +232,8 @@
     .said {
       font: 400 17px/1.55 var(--read);
       color: var(--text);
+      max-width: 68ch;    /* a reading measure; the column can be wider than a line should be */
+      text-wrap: pretty;
     }
     .partial .said { color: var(--dim); }
 
@@ -239,7 +246,7 @@
       /* Re-declared locally so an inline --hue on the element re-derives them.
          --accent on :root is computed once and inherited as a fixed value, so
          overriding --hue alone would not reach it. */
-      --accent: hsl(var(--hue) 85% 62%);
+      --accent: hsl(var(--hue) 74% 64%);
       --accent-line: hsl(var(--hue) 60% 55% / 0.4);
       border-top: 1px solid var(--accent-line);
       padding-top: 12px;
@@ -274,12 +281,17 @@
       display: block;
       margin-top: 2px;
       font-weight: 400;
-      color: #4b5f6e;
+      color: var(--dim);  /* the old #4b5f6e sat at 2.6:1 on the ink; this is 4.6:1 */
     }
 
     @media (max-width: 560px) { .tool { padding-left: 58px; } }
 
     .error { color: #ff8b8b; }
+    /* A failure gets a line in the log, not just a word in the header: what went wrong and what to do. */
+    .notice {
+      font: 500 13.5px/1.5 var(--ui); color: #ff8b8b;
+      padding: 10px 14px; border: 1px solid hsl(4 60% 50% / .35); border-radius: 8px; margin: 0;
+    }
 
     @media (max-width: 560px) {
       .head { flex-direction: column; align-items: flex-start; gap: 6px; }

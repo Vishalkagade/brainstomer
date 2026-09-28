@@ -37,7 +37,15 @@ const mode = () => modes.find((m) => m.id === modeId)
 const day = (iso) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 
 async function load() {
-  const data = await (await fetch('/versions')).json()
+  let data
+  try {
+    const response = await fetch('/versions')
+    if (!response.ok) throw new Error(`the server answered ${response.status}`)
+    data = await response.json()
+  } catch (err) {
+    $('change').replaceChildren(el('p', 'note', `Could not load the versions: ${err.message}. Reload the page, or check that the server is running.`))
+    return
+  }
   modes = data.modes
   canPromote = data.can_promote
   const query = new URLSearchParams(location.search)
@@ -97,6 +105,11 @@ function drawTimeline() {
     node.append(line, el('div', 'when', `${day(v.created_at)} · ${v.source}${calls}`))
     if (verdictLine(v)) node.append(el('div', 'when verdict', verdictLine(v)))
     node.onclick = () => pickVersion(v.id)
+    // reachable by keyboard too, not only by mouse
+    node.tabIndex = 0
+    node.setAttribute('role', 'button')
+    node.setAttribute('aria-pressed', String(v.id === versionId))
+    node.onkeydown = (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); pickVersion(v.id) } }
     if (!v.live && canPromote) node.append(promoteButton(v, state))
     return node
   }))
@@ -145,7 +158,8 @@ async function drawChange() {
   if (base && !v.live && previous && previous.id !== live.id) {
     for (const choice of ['previous', 'live']) {
       const link = el('a', against === choice ? 'on' : '', choice === 'live' ? `live v${live.n}` : `previous v${previous.n}`)
-      link.onclick = () => { against = choice; drawChange() }
+      link.href = `#${choice}`  // a real link: focusable, works with Enter
+      link.onclick = (event) => { event.preventDefault(); against = choice; drawChange() }
       sub.append(link, ' ')
     }
   } else if (base) sub.append(`v${base.n}`)

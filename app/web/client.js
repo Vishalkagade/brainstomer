@@ -780,6 +780,12 @@ function reset() {
 
 function fail(message) {
   setStatus('error', message)
+  clearEmpty()
+  const note = document.createElement('p')  // in the log too: the header word is easy to miss
+  note.className = 'notice'
+  note.textContent = `${message}. Start the call again when it is fixed.`
+  $('transcript').append(note)
+  scrollDown()
   teardown()
 }
 
