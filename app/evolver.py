@@ -301,16 +301,18 @@ This is a voice agent: the prompt must not ask for markdown, lists, or anything 
     return [{"role": "system", "content": rules}, {"role": "user", "content": current}]
 
 
-def call_model(messages: list[dict]) -> tuple[str, str]:
-    """One chat completion on Fireworks, first available model in MODELS. Returns (answer text, model id)."""
+def call_model(messages: list[dict], models: list[str] | None = None, max_tokens: int = 6000,
+               params: dict | None = None) -> tuple[str, str]:
+    """One chat completion on Fireworks, first available model in `models` (default MODELS). Returns (answer text, model id).
+    `params` are extra request fields, e.g. reasoning_effort for a small job that must not think for a minute."""
     key = config.require("FIREWORKS_API_KEY", "https://app.fireworks.ai/settings/users/api-keys")
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     failures = []
-    for model in MODELS:
+    for model in models or MODELS:
         response = httpx.post(
             FIREWORKS_URL, headers=headers, timeout=300,
-            json={"model": model, "messages": messages, "temperature": 0.3, "max_tokens": 6000,
-                  "response_format": {"type": "json_object"}},
+            json={"model": model, "messages": messages, "temperature": 0.3, "max_tokens": max_tokens,
+                  "response_format": {"type": "json_object"}, **(params or {})},
         )
         if response.status_code in (404, 429, 500, 502, 503):  # not deployed, over quota, or down: try the next
             failures.append(f"{model.rsplit('/', 1)[-1]}: {response.status_code}")

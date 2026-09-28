@@ -14,7 +14,9 @@ the system prompt did. Recaps are built off the reply path: at page load and by 
 command. `/profile` only reads what is cached; `/route` builds one from the store.
 """
 
+import json
 import os
+import re
 import sys
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -36,24 +38,53 @@ RELEVANT_MIN = 0.45   # measured 15 Sep: true matches 0.55-0.66, same mode other
 MAX_AGE_DAYS = 14     # "not too old": nothing older than this comes back
 MAX_SESSIONS = 3      # "at least the last three conversations" (Vishal, 26 Sep)
 READ_ONLY = os.environ.get("BRAINSTORMER_READ_ONLY") == "1"  # same switch server.py and evolver.py read
-NO_RECAP = {"general"}
+NO_RECAP = {"general"}  # no raw exchanges for General: its block is the areas line plus its call notes
+NOTES = 3             # call notes in the block: one per call, the last three calls
+RAW_TAIL = 2          # exchanges word for word from the newest call, after the notes
+MIN_TURNS_TO_NOTE = 3  # a call with fewer usable turns in a mode is not worth a model call
+NOTE_TURN_CHARS = 320  # each line of a call is cut here before it goes to the note writer
+NOTE_TURNS = 30        # only the last N turns of a call go to the note writer
+NOTE_BATCH = 4         # calls per model request; 16 in one request came back empty from every model (28 Sep)
+NOTE_MODELS = [        # a note is a small job: a model that thinks for a minute is the wrong tool (measured 28 Sep)
+    "accounts/fireworks/models/gpt-oss-120b",     # 0.9 s, 120 output tokens with reasoning_effort low
+    "accounts/fireworks/models/glm-5p3-flash",
+] + evolver.MODELS
+NOTE_PARAMS = {"reasoning_effort": "low"}
 
 
-def render(turns: list[dict], mode_name: str, tail: str = "") -> str:
-    """The memory block. Newest last, trimmed from the front to stay under MAX_TOKENS. `tail` is kept whole."""
-    if not turns and not tail:
+def render(turns: list[dict], mode_name: str, tail: str = "", notes: list[dict] | None = None, head: str = "") -> str:
+    """The memory block: call notes oldest first, then exchanges word for word, newest last. `tail` is kept whole.
+    Over MAX_TOKENS it drops the oldest note first, then the oldest exchange."""
+    notes = list(notes or [])
+    if not turns and not tail and not notes:
         return ""
+    head = head or (f"Earlier conversations in {mode_name} mode. Use them as context. "
+                    f"If he asks what was said before, tell him from these; otherwise do not recite them.\n")
     lines = []
     for t in turns:
         lines.append(f"He: {t['user_transcript'].strip()}")
         lines.append(f"You: {t['agent_text'].strip()}")
-    head = (f"Earlier conversations in {mode_name} mode, most recent last. Use them as context. "
-            f"If he asks what was said before, tell him from these; otherwise do not recite them.\n")
-    body = "\n".join(lines)
-    while profiles.estimate_tokens(head + body + tail) > MAX_TOKENS and len(lines) > 2:
-        lines = lines[2:]  # drop the oldest exchange
-        body = "\n".join(lines)
-    return head + body + tail
+
+    def body() -> str:
+        parts = [f"On {when(n['called_at'])}: {n['text'].strip()}" for n in notes]
+        if lines:
+            parts.append(("Last exchanges, word for word:\n" if notes else "") + "\n".join(lines))
+        return "\n".join(parts)
+
+    while profiles.estimate_tokens(head + body() + tail) > MAX_TOKENS and (notes or len(lines) > 2):
+        if notes:
+            notes.pop(0)  # the oldest note goes first
+        else:
+            lines = lines[2:]  # then the oldest exchange
+    return head + body() + tail
+
+
+def when(iso: str) -> str:
+    """'26 September' from a call's created_at; 'an earlier day' when the date is unreadable."""
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%-d %B")
+    except (ValueError, AttributeError):
+        return "an earlier day"
 
 
 def recent(conn, mode_id: str, depth: int, exclude_session: str | None = None) -> list[dict]:
@@ -83,11 +114,20 @@ def index(conn) -> str:
 
 
 def recall(conn, mode_id: str, vector: list[float] | None = None, exclude_session: str | None = None) -> str:
-    """The MEMORY block for a switch into `mode_id`: recent exchanges, plus the closest ones when there are words."""
+    """The MEMORY block for a switch into `mode_id`: notes on the last calls, the newest call's last exchanges,
+    plus the closest earlier exchanges when there are words to match."""
+    notes = store.summaries_for(conn, mode_id, NOTES, exclude_session)
     if mode_id in NO_RECAP:
-        return index(conn)
+        areas = index(conn)
+        if not notes:
+            return areas
+        return render([], "General", notes=notes, head=(areas + "\n" if areas else "") +
+                      "Notes on his last calls in General mode. If he asks what was said before, tell him from these.\n")
     live = store.current(conn, mode_id)
     rows = recent(conn, mode_id, int(live["settings"].get("history_depth") or 10), exclude_session)
+    if notes:  # the notes carry the older calls; the exchanges only need the newest call's end
+        newest = rows[-1]["session_id"] if rows else None
+        rows = [e for e in rows if e["session_id"] == newest][-RAW_TAIL:]
     tail = ""
     if vector is not None:
         seen = {(e["session_id"], e["ts_ms"]) for e in rows}
@@ -95,7 +135,45 @@ def recall(conn, mode_id: str, vector: list[float] | None = None, exclude_sessio
         if close:
             tail = "\nAlso, from earlier calls, related to what he just said:\n" + "\n".join(
                 f"He: {e['user_text'].strip()}\nYou: {e['agent_text'].strip()}" for e in close)
-    return render([{"user_transcript": e["user_text"], "agent_text": e["agent_text"]} for e in rows], live["name"], tail)
+    return render([{"user_transcript": e["user_text"], "agent_text": e["agent_text"]} for e in rows], live["name"], tail, notes)
+
+
+NOTE_PROMPT = """You write memory notes for a voice assistant. Each conversation below is one past call, in one area of
+the user's life. For each, write ONE note of 40 to 80 words in plain English, third person ("he asked ... you
+suggested ..."), keeping the concrete names, numbers and decisions exactly as said, and ending with what was left
+open if anything was. No praise, no advice, nothing that is not in the lines. Answer with a JSON object mapping
+each call's id to its note, nothing else."""
+
+
+def parse_json(text: str) -> dict:
+    """The model's JSON object, tolerant of a ```json fence. ValueError on anything else."""
+    body = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text.strip())
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"model did not return JSON: {err}")
+    if not isinstance(data, dict):
+        raise ValueError("model did not return a JSON object")
+    return data
+
+
+def summarise(conn, mode_id: str, convos: list[dict]) -> int:
+    """One note per new call with enough turns, all of them in one model call. Returns how many were stored."""
+    done = store.summarised_sessions(conn, mode_id)
+    todo = [c for c in convos if c["session_id"] not in done and len(c["turns"]) >= MIN_TURNS_TO_NOTE]
+    todo = sorted(todo, key=lambda c: c["created_at"], reverse=True)[:NOTE_BATCH]  # newest first; the rest next load
+    if not todo:
+        return 0
+    calls = {c["session_id"]: "\n".join(f"He: {t['user_transcript'].strip()[:NOTE_TURN_CHARS]}\n"
+                                        f"You: {t['agent_text'].strip()[:NOTE_TURN_CHARS]}" for t in c["turns"][-NOTE_TURNS:])
+             for c in todo}
+    text, model = evolver.call_model([{"role": "system", "content": NOTE_PROMPT},
+                                      {"role": "user", "content": json.dumps(calls, ensure_ascii=False)}],
+                                     models=NOTE_MODELS, max_tokens=1500, params=NOTE_PARAMS)
+    notes = parse_json(text)
+    rows = [{"session_id": c["session_id"], "called_at": c["created_at"], "text": str(notes[c["session_id"]])}
+            for c in todo if isinstance(notes.get(c["session_id"]), str) and notes[c["session_id"]].strip()]
+    return store.add_summaries(conn, mode_id, rows, model)
 
 
 def index_exchanges(conn, client: httpx.Client, mode_id: str, convos: list[dict] | None = None) -> int:
@@ -145,14 +223,20 @@ def relevant(conn, mode_id: str, vector: list[float], exclude_session: str | Non
     if not top:
         return ""
     turns = [{"user_transcript": e["user_text"], "agent_text": e["agent_text"]} for e in top]
-    return render(turns, store.current(conn, mode_id)["name"]).replace("most recent last", "the ones related to what he just said")
+    name = store.current(conn, mode_id)["name"]
+    return render(turns, name, head=f"Earlier exchanges in {name} mode, the ones related to what he just said. "
+                                    f"Use them as context; do not recite them unless he asks.\n")
 
 
 def refresh(conn, client: httpx.Client, mode_id: str) -> str:
+    convos = evolver.conversations(conn, client, mode_id)  # one fetch, four readers
+    try:
+        summarise(conn, mode_id, convos)  # one note per new call, one model call for all of them
+    except (SystemExit, ValueError, KeyError) as err:  # no model answered, or not the JSON asked for: notes wait for the next load
+        print(f"call notes for {mode_id} skipped: {str(err)[:160]}")
     if mode_id in NO_RECAP:
-        text = index(conn)
+        text = recall(conn, mode_id)
     else:
-        convos = evolver.conversations(conn, client, mode_id)  # one fetch, three readers
         try:
             index_exchanges(conn, client, mode_id, convos)  # so relevant() has something to search
         except SystemExit as err:  # no embedding model answered: recency recap still works

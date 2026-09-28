@@ -113,6 +113,17 @@ CREATE TABLE IF NOT EXISTS candidates (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS summaries (
+    id         INTEGER PRIMARY KEY,
+    mode_id    TEXT NOT NULL REFERENCES modes(id),
+    session_id TEXT NOT NULL,
+    called_at  TEXT NOT NULL,                 -- the call's created_at, so the block can say "on 26 September"
+    text       TEXT NOT NULL,                 -- one short note per call per mode: asked, answered, left open
+    model      TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (mode_id, session_id)
+);
+
 CREATE TABLE IF NOT EXISTS evidence (
     id         INTEGER PRIMARY KEY,
     mode_id    TEXT NOT NULL REFERENCES modes(id),
@@ -408,6 +419,26 @@ def exchanges_for(conn: sqlite3.Connection, mode_id: str) -> list[dict]:
     rows = conn.execute("SELECT session_id, ts_ms, user_text, agent_text, vector FROM exchanges WHERE mode_id = ? "
                         "ORDER BY ts_ms", (mode_id,)).fetchall()
     return [dict(r, vector=json.loads(r["vector"])) for r in rows]
+
+
+def add_summaries(conn: sqlite3.Connection, mode_id: str, rows: list[dict], model: str) -> int:
+    """One note per call. A second note for the same call is ignored, so a refresh never pays twice."""
+    cursor = conn.executemany(
+        "INSERT OR IGNORE INTO summaries (mode_id, session_id, called_at, text, model, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [(mode_id, r["session_id"], r["called_at"], r["text"], model, now()) for r in rows])
+    conn.commit()
+    return cursor.rowcount
+
+
+def summaries_for(conn: sqlite3.Connection, mode_id: str, last: int, exclude_session: str | None = None) -> list[dict]:
+    """The notes of the last `last` calls in this mode, oldest first."""
+    rows = conn.execute("SELECT session_id, called_at, text FROM summaries WHERE mode_id = ? AND session_id IS NOT ? "
+                        "ORDER BY called_at DESC LIMIT ?", (mode_id, exclude_session, last)).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def summarised_sessions(conn: sqlite3.Connection, mode_id: str) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT session_id FROM summaries WHERE mode_id = ?", (mode_id,))}
 
 
 def exchange_sessions(conn: sqlite3.Connection, mode_id: str) -> set[str]:
