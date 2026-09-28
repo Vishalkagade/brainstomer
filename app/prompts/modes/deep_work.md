@@ -10,7 +10,7 @@
   "model": null,
   "turn_detection": {
     "min_silence": 1800,
-    "max_silence": 5000,
+    "max_silence": 4000,
     "interrupt_response": true,
     "interruption_delay": 700
   },
