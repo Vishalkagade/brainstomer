@@ -13,8 +13,11 @@ ENV_FILE = ROOT / ".env"
 
 # The Voice Agent API. Two different hosts for the same product: REST over
 # HTTPS to manage agents and read past sessions, a WebSocket to hold a call.
-API_BASE = "https://agents.assemblyai.com/v1"
-WS_URL = "wss://agents.assemblyai.com/v1/ws"
+#
+# The global host routes to the nearest region, and a session is only readable
+# from the region that created it. A server in the US could mint tokens for a
+# caller in Europe and never see the call again (measured 28 Sep: the hosted demo
+# read back nothing). ASSEMBLYAI_REGION=eu|us pins both the page and the server.
 
 
 def load_env(path: Path = ENV_FILE) -> None:
@@ -61,6 +64,13 @@ def save_env(key: str, value: str, path: Path = ENV_FILE) -> None:
             text += "\n"
         text += line + "\n"
     path.write_text(text)
+
+
+load_env()
+REGION = os.environ.get("ASSEMBLYAI_REGION", "").strip().lower()
+AGENTS_HOST = f"agents.{REGION}.assemblyai.com" if REGION in ("eu", "us") else "agents.assemblyai.com"
+API_BASE = f"https://{AGENTS_HOST}/v1"
+WS_URL = f"wss://{AGENTS_HOST}/v1/ws"
 
 
 def require(name: str, where: str) -> str:

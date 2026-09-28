@@ -590,7 +590,7 @@ async function call() {
     micSource.connect(micTap)
     aura.listen(micTap, agentTap)
 
-    const url = new URL('wss://agents.assemblyai.com/v1/ws')
+    const url = new URL(window.WS_URL || 'wss://agents.assemblyai.com/v1/ws')  // same region as the server, so it can read the call back
     url.searchParams.set('token', token)
     ws = new WebSocket(url)
     let ready = false

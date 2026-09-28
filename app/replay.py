@@ -183,9 +183,12 @@ def main() -> None:
     p.add_argument("--server", default="http://localhost:3000")
     p.add_argument("--password", default="")
     p.add_argument("--mode", default="general")
+    p.add_argument("--seconds", type=float, default=0, help="replay only the first N seconds (a smoke test)")
     args = p.parse_args()
     config.load_env()
     pcm = user_pcm(args.session_id)
+    if args.seconds:
+        pcm = pcm[:int(args.seconds * RATE) * 2]
     print(f"replaying {len(pcm) / RATE / 2:.0f} s of the user's audio from {args.session_id}\n")
     new_id = asyncio.run(Client(args.server, args.password, args.mode).call(pcm))
     with httpx.Client(headers=config.headers(), timeout=60) as client:

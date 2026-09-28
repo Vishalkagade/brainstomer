@@ -220,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
         # Anything else is the page. The agent id is baked in at request time
         # rather than fetched, so the page has everything it needs to open a
         # socket the moment it loads.
-        page = (WEB / "index.html").read_text().replace("{{AGENT_ID}}", AGENT_ID)
+        page = (WEB / "index.html").read_text().replace("{{AGENT_ID}}", AGENT_ID).replace("{{WS_URL}}", config.WS_URL)
         self._send(200, page.encode(), "text/html; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802  (the base class names it this)
@@ -373,7 +373,7 @@ def main() -> None:
             print(f"router fingerprints built for {', '.join(router.build(conn))}")
     if JEV_MODE != "off":
         JEV_POOL.submit(jev.warm)  # open the connection now, not on the first route ask of the first call
-    print(f"agent  {AGENT_ID}")
+    print(f"agent  {AGENT_ID}  via {config.AGENTS_HOST}")
     print(f"talk   http://localhost:{port}")
     try:
         server.serve_forever()
