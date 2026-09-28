@@ -21,3 +21,6 @@ app/prompts/l1_user_core.md
 __pycache__/
 *.pyc
 .impeccable/
+.claude/
+.agents/
+skills-lock.json
