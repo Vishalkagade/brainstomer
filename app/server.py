@@ -217,6 +217,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, (WEB / "client.js").read_bytes(), "text/javascript")
             return
 
+        if path in ("/logo.png", "/favicon.png"):  # the only images the pages use; nothing else under app/web is served
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            body = (WEB / path[1:]).read_bytes()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         # Anything else is the page. The agent id is baked in at request time
         # rather than fetched, so the page has everything it needs to open a
         # socket the moment it loads.

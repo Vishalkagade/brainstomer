@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Brainstormer · evolution</title>
   <meta name="description" content="Every version of every mode: who wrote it, why, what changed, and whether the evidence kept it." />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%2358c9e6' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%2358c9e6'/%3E%3C/svg%3E" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/logo.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap" rel="stylesheet" />
@@ -39,7 +40,9 @@
     }
     main { width: 100%; max-width: 1040px; }
 
-    .head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding-bottom: 14px; }
+    .head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 14px; }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand img { width: 28px; height: 28px; border-radius: 7px; display: block; }
     .wordmark { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
     .wordmark span { color: var(--dim); font-weight: 400; }
     .head a { color: var(--dim); font-size: 13px; text-decoration: none; }
@@ -130,7 +133,7 @@
 <body>
   <main>
     <div class="head">
-      <h1 class="wordmark">Brainstormer <span>/ how each mode changed</span></h1>
+      <div class="brand"><img src="/logo.png" alt="" /><h1 class="wordmark">Brainstormer <span>/ how each mode changed</span></h1></div>
       <a href="/">back to the call</a>
     </div>
     <div class="modes" id="modes"></div>
