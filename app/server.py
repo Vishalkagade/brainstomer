@@ -335,6 +335,7 @@ class Handler(BaseHTTPRequestHandler):
                     if new_mode:
                         live = store.current(conn, new_mode)
                         decision.update(mode=new_mode, switch=True, signal="spawned",
+                                        revived=spawner.was_revived(conn, new_mode, body["session_id"]),
                                         spawned={"id": new_mode, "name": live["name"], "about": live["settings"].get("about", "")})
                 if decision["switch"]:
                     # the mode's memory block for the page to append to the prompt; the closest exchanges too when a vector exists

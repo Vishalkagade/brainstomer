@@ -14,6 +14,8 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -28,7 +30,9 @@ import store  # noqa: E402
 RELATED = 0.40      # cheap gate: only ask the model when the newest utterance is at least this close to another one
 MIN_CLUSTER = 3     # utterances about one thing, in one call, before a mode is spawned
 ESTABLISH_AFTER = 3  # distinct calls that used a provisional mode before it counts as established
-ARCHIVE_AFTER = 5    # calls since creation with no use: the button fades away
+ARCHIVE_PROVISIONAL_DAYS = 7    # born in a call, used in no other, and quiet this long: a likely misfire fades
+ARCHIVE_ESTABLISHED_DAYS = 30   # a real area of life, quiet this long: dormant, not deleted (Vishal, 29 Sep)
+REVIVE_MIN = 0.50    # a new cluster this close to an archived mode wakes it instead of spawning a twin
 
 # Fast first; this runs mid-call. Fireworks availability changes, so an ordered list, never one id.
 NAMING_MODELS = [
@@ -172,6 +176,10 @@ def maybe_spawn(conn, session_id: str, newest_id: int, group_fn=group_and_name) 
     newest = next((r for r in rows if r["id"] == newest_id), None)
     if newest is None or len(rows) < MIN_CLUSTER or len(related(newest, rows)) < MIN_CLUSTER:
         return None
+    close = related(newest, rows)
+    dormant, score = closest_archived(conn, [r["vector"] for r in close])
+    if dormant and score >= REVIVE_MIN:  # the subject came back: wake the old mode, and spend no model call on a name
+        return revive(conn, dormant, close)
     fields, model = group_fn([r["text"] for r in rows])  # newest is last, by id order
     members = [rows[i - 1] for i in fields["same"]]
     if len(members) < MIN_CLUSTER:
@@ -179,22 +187,61 @@ def maybe_spawn(conn, session_id: str, newest_id: int, group_fn=group_and_name) 
     return spawn(conn, session_id, members, fields, model)
 
 
-def sweep(conn) -> list[str]:
-    """Move provisional modes on: used in enough calls -> established; unused for long enough -> archived."""
+def last_used_ms(conn, mode: dict) -> int:
+    """When a call was last in this mode; its creation time when it never was."""
+    last = conn.execute("SELECT MAX(ts_ms) FROM switches WHERE mode_id = ?", (mode["id"],)).fetchone()[0]
+    if last:
+        return int(last)
+    return int(datetime.fromisoformat(mode["created_at"].replace("Z", "+00:00")).timestamp() * 1000)
+
+
+def sweep(conn, now_ms: int | None = None) -> list[str]:
+    """Move modes on by use and by days of quiet: provisional -> established after enough calls;
+    quiet for long enough -> archived. Archived is dormant, not deleted: revive() wakes it. General never sleeps."""
+    now_ms = now_ms or int(time.time() * 1000)
     notes = []
-    for m in conn.execute("SELECT id, name, created_at FROM modes WHERE status = 'provisional'").fetchall():
+    rows = conn.execute("SELECT id, name, status, created_at FROM modes WHERE status IN ('provisional', 'established')").fetchall()
+    for m in rows:
+        if m["id"] == router.GENERAL:
+            continue
         used_in = conn.execute("SELECT count(DISTINCT session_id) FROM switches WHERE mode_id = ?", (m["id"],)).fetchone()[0]
-        calls_since = conn.execute("SELECT count(DISTINCT session_id) FROM switches WHERE ts_ms > "
-                                   "(SELECT COALESCE(MIN(ts_ms), 0) FROM switches WHERE mode_id = ?)", (m["id"],)).fetchone()[0]
-        if used_in >= ESTABLISH_AFTER:
+        quiet_days = (now_ms - last_used_ms(conn, dict(m))) / 86_400_000
+        if m["status"] == "provisional" and used_in >= ESTABLISH_AFTER:
             store.set_status(conn, m["id"], "established")
             notes.append(f"{m['id']}: established (used in {used_in} calls)")
-        elif used_in <= 1 and calls_since >= ARCHIVE_AFTER:
+        elif m["status"] == "provisional" and used_in <= 1 and quiet_days >= ARCHIVE_PROVISIONAL_DAYS:
             store.set_status(conn, m["id"], "archived")
-            notes.append(f"{m['id']}: archived (not used again in {calls_since} calls)")
-        else:
-            notes.append(f"{m['id']}: provisional (used in {used_in} calls, {calls_since} calls since)")
+            notes.append(f"{m['id']}: archived (used once, quiet for {quiet_days:.0f} days)")
+        elif quiet_days >= ARCHIVE_ESTABLISHED_DAYS:
+            store.set_status(conn, m["id"], "archived")
+            notes.append(f"{m['id']}: archived (quiet for {quiet_days:.0f} days)")
     return notes
+
+
+def closest_archived(conn, vectors: list[list[float]]) -> tuple[str | None, float]:
+    """The archived mode whose fingerprint is closest to the centre of these sentences, and how close."""
+    centre = [sum(col) / len(vectors) for col in zip(*(router.unit(v) for v in vectors))]
+    best, score = None, 0.0
+    for r in conn.execute("SELECT f.mode_id, f.vector FROM fingerprints f JOIN modes m ON m.id = f.mode_id "
+                          "WHERE m.status = 'archived'"):
+        c = router.cosine(centre, json.loads(r["vector"]))
+        if c > score:
+            best, score = r["mode_id"], c
+    return best, score
+
+
+def revive(conn, mode_id: str, members: list[dict]) -> str:
+    """Wake an archived mode: its versions, notes and exchanges were never gone. Established again if it had earned that."""
+    used_in = conn.execute("SELECT count(DISTINCT session_id) FROM switches WHERE mode_id = ?", (mode_id,)).fetchone()[0]
+    store.set_status(conn, mode_id, "established" if used_in >= ESTABLISH_AFTER else "provisional")
+    store.claim_candidates(conn, [m["id"] for m in members], mode_id)
+    return mode_id
+
+
+def was_revived(conn, mode_id: str, session_id: str) -> bool:
+    """True when this mode existed before the call that just switched into it."""
+    return bool(conn.execute("SELECT 1 FROM switches WHERE mode_id = ? AND session_id != ? LIMIT 1", (mode_id, session_id)).fetchone()
+                or conn.execute("SELECT 1 FROM modes WHERE id = ? AND created_at < datetime('now', '-2 minutes')", (mode_id,)).fetchone())
 
 
 def main() -> None:

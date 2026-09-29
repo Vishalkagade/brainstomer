@@ -481,7 +481,7 @@ async function maybeRoute(text, final = false) {
 
       if (d.spawned) await loadModes(true)   // the new mode needs a button before it can be highlighted
       selectedMode = d.mode
-      await applyMode(d.mode, d.spawned ? 'spawner' : 'router', d.recap, d.spawned?.about)
+      await applyMode(d.mode, d.revived ? 'revived' : d.spawned ? 'spawner' : 'router', d.recap, d.spawned?.about)
     }
   } catch (err) {
     // routing is best effort; the call goes on in the current mode
@@ -513,7 +513,7 @@ async function applyMode(id, source = 'manual', recap = undefined, about = '') {
   const tools = (p) => p.session.tools.map((tool) => tool.name.replace('_', ' ')).join(', ') || 'none'
   showSwitch({
     name: profile.name,
-    how: source === 'spawner' ? 'new mode, created just now' : source === 'router' ? 'switched by what you said' + (routeNote ? `, ${routeNote}` : '') : '',
+    how: source === 'spawner' ? 'new mode, created just now' : source === 'revived' ? 'back after a while away' : source === 'router' ? 'switched by what you said' + (routeNote ? `, ${routeNote}` : '') : '',
     why: source === 'spawner' ? (about || 'You kept coming back to this subject, so it gets a mode of its own.') : '',
     deltas: [
       delta('waits', lastProfile?.session.input.turn_detection.min_silence, td.min_silence, ' ms'),

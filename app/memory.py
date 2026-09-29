@@ -263,6 +263,12 @@ def refresh_all(conn, client: httpx.Client) -> dict[str, int]:
     out = {}
     for m in store.list_modes(conn):
         out[m["id"]] = profiles.estimate_tokens(refresh(conn, client, m["id"]))
+    try:
+        import spawner
+        for note in spawner.sweep(conn):  # established by use, dormant by days of quiet
+            print(f"modes: {note}")
+    except Exception as err:
+        print(f"mode sweep skipped: {err}")
     if store.is_layer(conn, store.CORE) and not READ_ONLY:
         try:
             import user_core
