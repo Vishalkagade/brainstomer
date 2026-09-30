@@ -62,9 +62,10 @@ def questions(options: dict[str, str]) -> dict:
     from typesafe_sdk import Choice, Noul
     return {
         "mode": Choice(
-            instructions="Which area of the user's life is what they are saying now closest to? Pick the closest related "
-                         "area even if the detail is new to it; pick none only when no area is related. Use what the agent "
-                         "just said as context: a short answer belongs to the area of the question it answers.",
+            # near is not enough: measured 29 Sep on 26 calls, wrong switches 10 -> 4
+            instructions="Which area of the user's life is what they are saying now about? Pick an area only when the words are "
+                         "about that area itself. Being near an area or loosely related to it is not enough: then pick none. Use what "
+                         "the agent just said as context: a short answer belongs to the area of the question it answers.",
             criteria=options),
         "reply": Noul(instructions="The user is answering or reacting to what the agent just said."),
         # free in the same call: the signal the corrections ledger will want
